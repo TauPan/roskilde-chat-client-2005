@@ -1,11 +1,13 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.31 2003/04/28 16:56:20 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.32 2003/04/29 14:36:31 friedel Exp friedel $
 ;;; There's no documentation. But the changelog at the bottom of the
 ;;; file should give useful hints.
 
 ;;; A little configuration:
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 (define REFRESH-LINES-TIMEOUT 5) ; Lines will be refreshed every n
                                         ; seconds
 (define GET-NEW-LINE-WAIT 100000) ; 1/10 s ; usecs to wait before the
@@ -18,6 +20,7 @@ exec guile --debug -e main -s $0 $@
                                         ; further WINCH signals
 
 ;;; Global constants (should not be modified)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (define admin-nick "Administrator")
 
 (define default-from-arg "")
@@ -70,8 +73,9 @@ exec guile --debug -e main -s $0 $@
                                 "/roskilde-chat.log"))
 (define SHOULD-LOGIN #t)
 
-(define mutex-sync (make-mutex)) ; Global mutex for non-threadsafe
-                                        ; operations
+(define mutex-curses (make-mutex)) ; Global mutex for curses
+(define mutex-format (make-mutex)) ; Global mutex for (format)
+
 (define FINISHED #f)   ; it #t, client will terminate
 ;; (define REDRAWEDIT #f) ; if #t, editing area is fully redrawn
 (define REDRAWLINES #f); if #t, text area is fully redrawn
@@ -91,7 +95,8 @@ exec guile --debug -e main -s $0 $@
 (load-extension "./guile-ncurses.so" "init_curses")
 
 ;;; Functions for building strings
-
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (define (char->string c)
   (make-string 1 c))
 
@@ -100,10 +105,21 @@ exec guile --debug -e main -s $0 $@
   (string-append (char->string command-c)
                  text))
 
+(define (chat-random)
+  "Return a random number as a string"
+  (number->string (random 1000000)))
+
+(define (current-date-and-time)
+  "Return the date+time string in the format the roskilde
+  webchat-server uses"
+  (strftime "%T, %Y-%m-%d" (gmtime (current-time))))
+
+;;; http-relevant strings
+;;;;;;;;;;;;;;;;;;;;;;;;;
 (define (url-encode text)
   "Cheap url encoding (makes hex out of everything :)"
   ;; lock, because of format
-  (let ((hexlist (with-mutex mutex-sync
+  (let ((hexlist (with-mutex mutex-format
                              (map (lambda (c)
                                     (format #f "%~x" (char->integer c)))
                                              (string->list text)))))
@@ -140,30 +156,10 @@ exec guile --debug -e main -s $0 $@
   "Calls make-script-args with base prepended to script"
   (make-script-args (string-append base script) args))
 
-
-(define (list->alist lst)
-  "Convert lst with even number of elements to an alist, using the
-  elements at uneven positions as car and the others as cdr for each
-  pair"
-  (if (null? lst)
-      '()
-    (let ((rest (cdr lst)))
-      (cons (cons (car lst)
-                  (if (null? rest)
-                      (error
-                       "List must have even number of elements!")
-                    (car rest)))
-            (list->alist (cddr lst))))))
-
-
 (define (make-args-apply base script . args)
   "Constructs an alist alternating over the rest argument and calls
   make-base-script-args"
   (make-base-script-args base script (list->alist args)))
-
-(define (chat-random)
-  "Return a random number as a string"
-  (number->string (random 1000000)))
 
 (define (make-msg-url nick msgstring from to)
   "Return a mesage url for a messagestring"
@@ -195,38 +191,9 @@ exec guile --debug -e main -s $0 $@
   (make-args-apply base-url read-url
                  name-arg (url-encode nick)))
 
-(define (drop-before-match lines regexp remove)
-  "drop all lines in <lines> before the first one matching <regexp>.
-  Remove the matched substring from the first matching line if
-  <remove> is #t"
-  (let remover ((filtered lines)
-                (matcher (string-match regexp (car lines))))
-       (if (null? filtered)
-           '()
-         (if matcher
-             (if remove
-                 (let ((firstmatch (car filtered))
-                       (m-start (match:start matcher))
-                       (m-end (match:end matcher)))
-                   (cons (string-append (substring firstmatch
-                                                   0
-                                                   m-start)
-                                        (substring firstmatch
-                                                   m-end
-                                                   (string-length
-                                                    firstmatch)))
-                         (cdr filtered)))
-               filtered)
-           (remover (cdr filtered)
-                    (string-match regexp (cadr filtered)))))))
-
-
-(define (current-date-and-time)
-  "Return the date+time string in the format the roskilde
-  webchat-server uses"
-  (strftime "%T, %Y-%m-%d" (gmtime (current-time))))
-
 ;;; Network and other IO
+;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;;; format is not thread safe, grmbl!
 ;;; got the following from
@@ -239,6 +206,9 @@ exec guile --debug -e main -s $0 $@
 ;;; This definition is not used right now, i decided to use
 ;;; simple-format where possible and thereby reduced the use of
 ;;; (format) to one thread.
+
+;;; Communication with the chatserver
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (define (get-connector server-name port)
   "Return a thunk that will return a connected socket to
@@ -419,6 +389,9 @@ exec guile --debug -e main -s $0 $@
                (cons line newlines)))))
     response))
 
+;;; Other interaction
+;;;;;;;;;;;;;;;;;;;;;
+
 (define (get-nick)
   "Get the nick to connect as"
   (let ((cmdargs (option-ref OPTIONS '() #f)))
@@ -427,28 +400,6 @@ exec guile --debug -e main -s $0 $@
       (begin
        (display "Nick: ")
        (read-line)))))
-
-(define ->
-  (lambda (x dec min)
-    (let ((newx (- x dec)))
-      (if (> newx min)
-          newx
-        min))))
-
-(define -1>0
-  (lambda (x)
-    (-> x 1 0)))
-
-(define +<
-  (lambda (x inc max)
-    (let ((newx (+ x inc)))
-      (if (< newx max)
-          newx
-        max))))
-
-(define +1<
-  (lambda (x max)
-    (+< x 1 max)))
 
 (define history-access
   (let ((history '())                   ; history for the editor
@@ -519,7 +470,7 @@ exec guile --debug -e main -s $0 $@
                                                     #\space
                                                     (+1< strpos len))
                                       len))))
-                (with-mutex mutex-sync
+                (with-mutex mutex-curses
                             ;; Draw the line
                             (wmove window (car startpos) (cdr startpos))
                             (waddstr window (substring line
@@ -673,6 +624,34 @@ exec guile --debug -e main -s $0 $@
     #t))
 
 ;;; Some list functions
+;;;;;;;;;;;;;;;;;;;;;;;
+
+(define (drop-before-match lines regexp remove)
+  "drop all lines in <lines> before the first one matching <regexp>.
+  Remove the matched substring from the first matching line if
+  <remove> is #t"
+  (let remover ((filtered lines)
+                (matcher (string-match regexp (car lines))))
+       (if (null? filtered)
+           '()
+         (if matcher
+             (if remove
+                 (let ((firstmatch (car filtered))
+                       (m-start (match:start matcher))
+                       (m-end (match:end matcher)))
+                   (cons (string-append (substring firstmatch
+                                                   0
+                                                   m-start)
+                                        (substring firstmatch
+                                                   m-end
+                                                   (string-length
+                                                    firstmatch)))
+                         (cdr filtered)))
+               filtered)
+           (remover (cdr filtered)
+                    (string-match regexp (cadr filtered)))))))
+
+
 (define (appendmax max . args)
   "Append the arguments and then truncate the resulting list to <max>
   elements"
@@ -688,7 +667,55 @@ exec guile --debug -e main -s $0 $@
     (append (list-head lst pos)
             (cons elt (list-tail lst pos)))))
 
+
+(define (list->alist lst)
+  "Convert lst with even number of elements to an alist, using the
+  elements at uneven positions as car and the others as cdr for each
+  pair"
+  (if (null? lst)
+      '()
+    (let ((rest (cdr lst)))
+      (cons (cons (car lst)
+                  (if (null? rest)
+                      (error
+                       "List must have even number of elements!")
+                    (car rest)))
+            (list->alist (cddr lst))))))
+
+
+;;; Calculations with limits
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(define ->
+  (lambda (x dec min)
+    (let ((newx (- x dec)))
+      (if (> newx min)
+          newx
+        min))))
+
+(define -1>0
+  (lambda (x)
+    (-> x 1 0)))
+
+(define +<
+  (lambda (x inc max)
+    (let ((newx (+ x inc)))
+      (if (< newx max)
+          newx
+        max))))
+
+(define +1<
+  (lambda (x max)
+    (+< x 1 max)))
+
+
 ;;; A few commands that are needed or useful outside of parse-user-input
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(define (loginannounce nick)
+  (send-admin-msg
+   (string-append nick
+                  " has just logged in")))
 
 ;;; Counterparts to the unix commands true and false:
 (define (true)
@@ -698,6 +725,10 @@ exec guile --debug -e main -s $0 $@
 (define (false)
   "false - do nothing, unsuccessfully"
   #f)
+
+
+;;; Access to global variables
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;;; Redraw all:
 (define redraw
@@ -711,6 +742,7 @@ exec guile --debug -e main -s $0 $@
 
 ;;; Parser for entered line, checks for command-character at the start
 ;;; of the line
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (define (parse-user-input line sock nick)
   "Return a thunk, based on the users command"
   (if (string-null? line)
@@ -742,8 +774,10 @@ exec guile --debug -e main -s $0 $@
               (send-msg info-nick
                         (string-append
                          "Known commands: help, quit, stop, msg "
-                         "<nick> <text>, login [password], logoff, fakemsg "
-                         "<from> <to> <text>, fakepub <from>, names")
+                         "<nick> <text>, login [password], "
+                         "qlogin [password], logoff, "
+                         "fakemsg <from> <to> <text>, "
+                         "fakepub <from>, names")
                         info-nick
                         nick)))
            (quitchat
@@ -762,12 +796,20 @@ exec guile --debug -e main -s $0 $@
                         (rest-from 1)
                         nick
                         (car args))))
+           (qlogmein
+            (lambda ()
+              (let ((pw (if (not (null? args))
+                                  (rest-from 0)
+                                PASSWORD)))
+                (if (and (not (logged-in? nick))
+                         (login nick pw))
+                    (begin
+                     (set! SHOULD-LOGIN #t)
+                     (set! PASSWORD pw))))))
            (logmein
             (lambda ()
-              (if (login nick (if (not (null? args))
-                                  (rest-from 0)
-                                PASSWORD))
-                  (set! SHOULD-LOGIN #t))))
+              (qlogmein)
+              (loginannounce nick)))
            (logmeoff
             (lambda ()
               (set! SHOULD-LOGIN #f)
@@ -805,6 +847,8 @@ exec guile --debug -e main -s $0 $@
             sendmsg)
            ((string=? command "logoff")
             logmeoff)
+           ((string=? command "qlogin")
+            qlogmein)
            ((string=? command "login")
             logmein)
            ((string=? command "fakemsg")
@@ -820,8 +864,9 @@ exec guile --debug -e main -s $0 $@
         ;; no command, send the line
         sendpub))))
 
-;;; Main
-
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;                  Main
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (define (main argl)
   ;;; FIXME: Parse command line arguments
   (if (not (defined? 'call-with-new-thread))
@@ -945,9 +990,7 @@ exec guile --debug -e main -s $0 $@
                               PASSWORD)))
                      (display "Sorry, Try again!")
                      (newline))
-                   (send-admin-msg
-                    (string-append nick
-                                   " has just logged in"))))))
+                   (loginannounce nick)))))
            ;; Screen update as a new thread:
            (makescroller
             (lambda ()
@@ -958,7 +1001,7 @@ exec guile --debug -e main -s $0 $@
                                                    '())))
                     (append-log-maybe (reverse newlines))
                     (let ((drawlines (if REDRAWLINES
-                                         (with-mutex mutex-sync
+                                         (with-mutex mutex-curses
                                                      (ignore-all-signals)
                                                      (werase scrollwin)
                                                      (wmove scrollwin 0 0)
@@ -968,7 +1011,7 @@ exec guile --debug -e main -s $0 $@
                                                                 newlines
                                                                 lines))
                                        newlines)))
-                      (with-mutex mutex-sync
+                      (with-mutex mutex-curses
                                   (for-each
                                    (lambda (line)
                                      (waddstr scrollwin
@@ -991,7 +1034,7 @@ exec guile --debug -e main -s $0 $@
                                              oldlines)))
                         (begin
                          (with-mutex
-                          mutex-sync
+                          mutex-curses
                           (waddstr scrollwin
                                    (char->string #\newline))
                           (waddstr scrollwin
@@ -1011,7 +1054,7 @@ exec guile --debug -e main -s $0 $@
                             (yield)
                             (sleep REFRESH-LINES-TIMEOUT)))))
             (while (not FINISHED)
-              (with-mutex mutex-sync
+              (with-mutex mutex-curses
                           (if RESETWINDOWS
                               (begin
                                (while RESETWINDOWS ; Shrug off
@@ -1038,7 +1081,7 @@ exec guile --debug -e main -s $0 $@
               (usleep GET-NEW-LINE-WAIT)
               (signal-condition-variable cond-ready)
               (yield))
-            (with-mutex mutex-sync
+            (with-mutex mutex-curses
                         (wclear typewin)
                         (waddstr
                          typewin
@@ -1058,6 +1101,10 @@ exec guile --debug -e main -s $0 $@
             (primitive-exit))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.32  2003/04/29 14:36:31  friedel
+;;; Prevented immediate segfault after several WINCHs. (although chat.scm
+;;; segfaults on termination)
+;;;
 ;;; Revision 1.31  2003/04/28 16:56:20  friedel
 ;;; Bug in parse-user-input with input lines starting with " "
 ;;;
