@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.25 2003/04/22 15:12:15 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.26 2003/04/24 20:13:01 friedel Exp friedel $
 ;;; There's no documentation. But the changelog at the bottom of the
 ;;; file should give useful hints.
 
@@ -14,6 +14,8 @@ exec guile --debug -e main -s $0 $@
 (define default-to-arg "All")
 (define default-rand-arg "0")
 
+(define info-nick "***")
+
 (define server-port 80)
 
 (define server-url "www.roskilde-festival.dk")
@@ -25,8 +27,8 @@ exec guile --debug -e main -s $0 $@
 (define logoff-url "RFChatRemoveOnline.php")
 (define userlist-url "RFChatPrivate.php")
 
-(define rand-arg "random")
-(define nick-arg "name")
+(define random-arg "random")
+(define name-arg "name")
 (define message-arg "message")
 (define from-arg "messageFrom")
 (define to-arg "messageTo")
@@ -152,11 +154,11 @@ exec guile --debug -e main -s $0 $@
 (define (make-msg-url nick msgstring from to)
   "Return a mesage url for a messagestring"
   (make-args-apply base-url send-url
-                   rand-arg  (chat-random)
-                   nick-arg (url-encode nick)
+                   random-arg  (chat-random)
+                   name-arg (url-encode nick)
                    message-arg (url-encode msgstring)
-                   from-arg (url-encode from)
-                   to-arg (url-encode to)))
+                   to-arg (url-encode to)
+                   from-arg (url-encode from)))
 
 ;;; FIXME: New parameter: timestamp for optional Only-If-Newer Header
 (define (http-get-request host url)
@@ -177,7 +179,7 @@ exec guile --debug -e main -s $0 $@
 (define (make-retrieve-url nick)
   "Return an url to retrieve messages for <nick>"
   (make-args-apply base-url read-url
-                 nick-arg (url-encode nick)))
+                 name-arg (url-encode nick)))
 
 (define (drop-before-match lines regexp remove)
   "drop all lines in <lines> before the first one matching <regexp>.
@@ -314,7 +316,7 @@ exec guile --debug -e main -s $0 $@
   (string=? "ok&"
             (car (get-from-chatserver (http-get-args server-url
                                                      base-url login-url
-                                                     rand-arg (chat-random)
+                                                     random-arg (chat-random)
                                                      login-arg nick
                                                      password-arg pw)
                                       "^&entry="))))
@@ -323,7 +325,7 @@ exec guile --debug -e main -s $0 $@
   "Remove <nick> from Chat"
   (send-to-chatserver (http-get-args server-url
                                      base-url logoff-url
-                                     rand-arg (chat-random)
+                                     random-arg (chat-random)
                                      login-arg nick)))
 
 (define (users)
@@ -331,7 +333,7 @@ exec guile --debug -e main -s $0 $@
   (let* ((rawlist (car (get-from-chatserver (http-get-args server-url
                                                            base-url
                                                            userlist-url
-                                                           rand-arg
+                                                           random-arg
                                                            (chat-random))
                                             "^&users=")))
          (cutraw (substring rawlist 0 (1- (string-length rawlist)))))
@@ -350,7 +352,7 @@ exec guile --debug -e main -s $0 $@
   (string->number (car (get-from-chatserver (http-get-args server-url
                                                            base-url
                                                            online-url
-                                                           rand-arg
+                                                           random-arg
                                                            (chat-random))
                                             "^&amount="))))
 
@@ -476,7 +478,7 @@ exec guile --debug -e main -s $0 $@
               (usleep 10000)            ; 1/100 s
               (let* ((len (string-length line))
                      (textwidth (- width (cdr startpos)))
-                     (partnums 4);; line is partitioned for scrolling
+                     (partnums 7);; line is partitioned for scrolling
                      (leaveoff (- partnums 1))
                      (linepart (/ 1 partnums))
                      (partwidth (inexact->exact (* textwidth linepart)))
@@ -495,7 +497,7 @@ exec guile --debug -e main -s $0 $@
                                                               #\space
                                                               0
                                                               (-1>0 strpos))
-                                               0)
+                                               -1)
                                            len)))
                      (afterword (lambda ()
                                   (or (string-index line
@@ -710,12 +712,12 @@ exec guile --debug -e main -s $0 $@
            ;;; COMMANDS:
            (help
             (lambda ()
-              (send-msg nick
+              (send-msg info-nick
                         (string-append
-                         "*** Known commands: help, quit, stop, msg "
-                         "<nick> <text>, login, logoff, fakemsg "
+                         "Known commands: help, quit, stop, msg "
+                         "<nick> <text>, login [password], logoff, fakemsg "
                          "<from> <to> <text>, fakepub <from>, names")
-                        nick
+                        info-nick
                         nick)))
            (quitchat
             (lambda () (set! FINISHED #t)))
@@ -757,10 +759,10 @@ exec guile --debug -e main -s $0 $@
                         default-to-arg)))
            (names
             (lambda ()
-              (send-msg nick
-                        (simple-format #f "*** Logged in Users: ~a"
+              (send-msg info-nick
+                        (simple-format #f "Logged in Users: ~a"
                                        (users))
-                        nick
+                        info-nick
                         nick))))
       (if (char=? (string-ref line 0)
                   command-c)
@@ -823,6 +825,7 @@ exec guile --debug -e main -s $0 $@
            (typewin #f)
            (winchhandler
             (lambda (x)
+              (ignore-all-signals)
               (lock-mutex sync-mutex)
               (let ((columns (getenv "COLUMNS"))
                     (lines (getenv "LINES")))
@@ -842,7 +845,8 @@ exec guile --debug -e main -s $0 $@
                                     (- LINES typesize)
                                     0))
               (redraw)
-              (unlock-mutex sync-mutex)))
+              (unlock-mutex sync-mutex)
+              (set-handlers)))
            (ignore-all-signals
             (lambda ()
               (sigaction SIGCONT SIG_IGN)
@@ -850,9 +854,12 @@ exec guile --debug -e main -s $0 $@
               (sigaction SIGQUIT SIG_IGN)
               (sigaction SIGWINCH SIG_IGN)))
            (aborthandler
-            (lambda (x) (set! FINISHED #t)))
+            (lambda (x)
+              (ignore-all-signals)
+              (set! FINISHED #t)))
            (conthandler
-            (lambda (x) (set-handlers)))
+            (lambda (x)
+              (setup)))
            (set-handlers
             (lambda ()
               (sigaction SIGCONT conthandler)
@@ -988,6 +995,9 @@ exec guile --debug -e main -s $0 $@
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.26  2003/04/24 20:13:01  friedel
+;;; A few more editor commands (with esc-prefix or meta)
+;;;
 ;;; Revision 1.25  2003/04/22 15:12:15  friedel
 ;;; Fixed editor behaviour when going back (with key-left or ctrl-b),
 ;;; history jumps to end of line, sanitized history behaviour (a little)
