@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.17 2003/04/15 22:22:25 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.18 2003/04/21 11:42:40 friedel Exp friedel $
 
 ;;; A little configuration:
 
@@ -53,6 +53,11 @@ exec guile --debug -e main -s $0 $@
                                         (value #t)))))
 
 ;;; GLOBAL VARIABLES! EVIL! :)
+;; parsed options:
+(define LOGFILE (string-append  "." ;(getenv "HOME")
+                                "/roskilde-chat.log"))
+(define SHOULD-LOGIN #t)
+
 (define sync-mutex (make-mutex)) ; Global mutex, 2 threads. Should be
                                  ; enough
 (define FINISHED #f)   ; it #t, client will terminate
@@ -60,8 +65,7 @@ exec guile --debug -e main -s $0 $@
 (define REDRAWLINES #f); if #t, text area is fully redrawn
 (define PASSWORD "")   ; we have to memorize the password because we
                                         ; need to re-authenticate
-(define LOGFILE (string-append  "." ;(getenv "HOME")
-                                "/roskilde-chat.log"))
+
 ;;; End of variables
 
 (dynamic-link "libncurses.so")
@@ -330,6 +334,12 @@ exec guile --debug -e main -s $0 $@
             (delete1! default-to-arg
                     (string-split cutraw #\,)))))
 
+(define (logged-in? nick)
+  "Return #t if nick is logged in, #f otherwise."
+  (if (member nick (users))
+      #t
+    #f))
+
 (define (numusers)
   "Return number of logged in users"
   (string->number (car (get-from-chatserver (http-get-args server-url
@@ -542,7 +552,7 @@ exec guile --debug -e main -s $0 $@
                 (substring joined
                            0
                            (1- (string-length joined))))))
-                  ;;; COMMANDS:
+           ;;; COMMANDS:
            (help
             (lambda ()
               (send-msg nick
@@ -594,7 +604,7 @@ exec guile --debug -e main -s $0 $@
                   command-c)
           (cond
            ((string=? command "")
-            sendpub)                    ; Line started with <command-c>#\space
+            sendpub)   ; Line started with <command-c>#\space
            ((string=? command "quit")
             quitchat)
            ((or (string=? command "suspend")
@@ -627,6 +637,7 @@ exec guile --debug -e main -s $0 $@
       (error "Please reconfigure guile with --with-threads and
       recompile and install!"))
   ;;; Parse options (other than nick)
+  (set! SHOULD-LOGIN (not (option-ref OPTIONS 'nologin #f)))
   (set! LOGFILE (and (not (option-ref OPTIONS 'nologfile #f))
                      (option-ref OPTIONS
                                  'logfile
@@ -709,7 +720,7 @@ exec guile --debug -e main -s $0 $@
               (set-handlers)))
            (trylogin
             (lambda ()
-              (if (not (option-ref OPTIONS 'nologin #f))
+              (if SHOULD-LOGIN
                   (begin
                    (while
                        (not (login
@@ -768,7 +779,7 @@ exec guile --debug -e main -s $0 $@
                                   "Exiting chat. Please wait a moment...")
                          (wrefresh scrollwin)
                          (unlock-mutex sync-mutex)))))))))
-          (simple-format #t "Currently logged in: ~a users." (numusers))
+          (simple-format #t "Currently logged in: ~a users.~%" (numusers))
           (trylogin)
           (append-log-maybe (list
                              (simple-format #f
@@ -790,6 +801,9 @@ exec guile --debug -e main -s $0 $@
                  (set! line (enter-string typewin))
                  ((parse-user-input line sock nick)) ; returns a thunk
                                         ; that is executed immediately
+                 (if (and SHOULD-LOGIN
+                          (not (logged-in? nick)))
+                     (login nick PASSWORD))
                  (if FINISHED
                      (begin
                       (lock-mutex sync-mutex)
@@ -800,9 +814,7 @@ exec guile --debug -e main -s $0 $@
                       (unlock-mutex sync-mutex)
                       (join-thread scroller)
                       (restore-signals)
-                      (if (not (option-ref OPTIONS
-                                           'nologin
-                                           #f))
+                      (if SHOULD-LOGIN
                           (logoff nick))
                       (endwin)
                       (append-log-maybe
@@ -814,6 +826,11 @@ exec guile --debug -e main -s $0 $@
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.18  2003/04/21 11:42:40  friedel
+;;; Logfile support. New command-line switches: --nologfile (or -L)
+;;;                                     and --logfile <logfile> (or
+;;;                                     -l)
+;;;
 ;;; Revision 1.17  2003/04/15 22:22:25  friedel
 ;;; command-line switch --nologin (or -n) instead of DEBUGGING Parameter
 ;;;
