@@ -1,9 +1,10 @@
 #!/usr/local/bin/guile \
 --debug -e main -s
 !#
-;;; $Id: chat.scm,v 1.3 2003/04/09 15:09:50 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.4 2003/04/09 15:46:16 friedel Exp friedel $
 
 (define default-nick "Friedel")
+(define DEBUGGING #t)
 
 ;;; Configuration (global constants... sort of :)
 (define admin-nick "Administrator")
@@ -30,9 +31,14 @@
 (define login-arg "login")
 (define password-arg "password")
 
-(use-modules (ice-9 readline)
-             (srfi srfi-1)
-             (ice-9 regex))
+(define message-re "^&message=")
+
+(use-modules (srfi srfi-1)
+             (ice-9 regex)
+             (ice-9 threads))
+
+(dynamic-link "libncurses.so")
+(load-extension "./guile-ncurses.so" "init_curses")
 
 ;;; Functions for building strings
 (define (url-encode text)
@@ -206,7 +212,7 @@
         (sock (connect-chat server-url server-port)))
     (display (http-get-request server-url get-url)
              sock)
-    (get-answer sock "^&message=")))
+    (get-answer sock message-re)))
 
 (define flush-response close-port)
 
@@ -241,52 +247,199 @@
         (sock (connect-chat server-url server-port)))
     (display (http-get-request server-url get-url)
              sock)
-    (get-response sock "^&message=")))
+    (get-response sock message-re)))
+
+(define (get-nick)
+  (if (not (null? (cdr (command-line))))
+      (cadr (command-line))
+    (begin
+     (display "Nick: ")
+     (read-line))))
+
+(define (enter-string window)
+  "Read a string from an ncurses window"
+  (usleep 100000) ; 1/10 s
+  (let ((startpos (getyx window))
+        (width (getmaxx window))
+        (length (getmaxy window))
+        (-1>0 (lambda (x)
+                (let ((newx (1- x)))
+                  (if (< newx 0)
+                      x
+                    newx))))
+        (+1< (lambda (x max)
+               (let ((newx (1+ x)))
+                 (if (< newx max)
+                     newx
+                   x)))))
+    (let rec-edit ((strpos 0)
+                   (line ""))
+;         (display (format #f "l: ~s~%" line)
+;                  (current-error-port))
+         (let* ((liney (quotient strpos width))
+                (y  (+ liney
+                       (car startpos)))
+                (x (if (zero? liney)
+                       (+ strpos (cdr startpos))
+                     (- strpos (* liney width))))
+                (len (string-length line)))
+           (wmove window y (-1>0 x))
+           (waddstr window
+                    (substring line
+                               (-1>0 strpos)
+                               len))
+           (wclrtoeol window)
+           (wmove window y x)
+           (wrefresh window)
+           (let ((c (wgetch window)))
+;             (display (format #f "c: ~s~%" c)
+;                      (current-error-port))
+             (if (equal? c #\cr)
+                 line
+               (case c
+                 ((key-backspace #\del #\bs)
+                  (rec-edit (-1>0 strpos)
+                            (string-append
+                             (substring line
+                                        0
+                                        (-1>0 strpos))
+                             (substring line
+                                        (+1< strpos len)
+                                        len))))
+                 (else (if (char? c)
+                           (rec-edit (+1< strpos width)
+                                     (string-append;; add char
+                                      (substring line
+                                                 0
+                                                 strpos)
+                                      (make-string 1 c)
+                                      (substring line
+                                                 (+1< strpos len)
+                                                 len)))
+                         (rec-edit strpos
+                                   line))))))))))
 
 ;;; Main
 
 (define (main argl)
-  (let ((in (current-input-port))
-        (out (current-output-port)))
-    (activate-readline)
   ;;; FIXME: Parse command line arguments
-    (let* ((sock '())
-           (nick default-nick)
-           (lines '())
-           (line "")
-           (sighandler (lambda (x)
-                         (restore-signals)
-                         (logoff sock nick)
-                         (primitive-exit))))
-      (while (not (login sock
-                         nick
-                         (getpass (format #f
-                                          "Password for ~a: "
-                                          nick))))
-        (display "Sorry, Try again!")
-        (newline))
-      (send-admin-msg sock
-                      (string-append nick
-                                     " has just logged in"))
-      (sigaction SIGINT sighandler)
-      (sigaction SIGQUIT sighandler)
-      (set-port-column! (current-output-port) 0)
-      (set-port-line! (current-output-port) 0)
-      (if (> (primitive-fork) 0)
-          (let loop () ;parent
-               (set! lines (get-new-lines sock nick lines))
-               (for-each (lambda (line)
-                           (display line)
-                           (newline)) lines)
-               (sleep 1)
-               (loop))
-        (let loop () ; child
-             (set! line (read-line))
+  (if (not (defined? 'call-with-new-thread))
+      (error "Please reconfigure guile with --with-threads and
+      recompile and install!"))
+  (let* ((sock '())
+         (nick (get-nick))
+         (lines '())
+         (line ""))
+    (if (not DEBUGGING)
+        (begin
+         (while (not (login sock
+                            nick
+                            (getpass (format #f
+                                             "Password for ~a: "
+                                             nick))))
+           (display "Sorry, Try again!")
+           (newline))
+         (send-admin-msg sock
+                         (string-append nick
+                                        " has just logged in"))))
+    (let* ((stdscr (initscr))
+           (FINISHED #f)
+           (typesize 1)
+           (COLS 80)
+           (LINES 24)
+           (scrollwin #f)
+           (typewin #f)
+           (sync-mutex (make-mutex))
+           (aborthandler (lambda (x)
+                           (set! FINISHED #t)))
+           (winchhandler (lambda (x)
+                           (lock-mutex sync-mutex)
+                           (let ((columns (getenv "COLUMNS"))
+                                 (lines (getenv "LINES")))
+                             (set! COLS
+                                   (if columns
+                                       (string->number columns)
+                                     (getmaxx stdscr)))
+                             (set! LINES (if lines
+                                             (string->number lines)
+                                           (getmaxy stdscr))))
+                           (set! scrollwin (newwin (- LINES typesize)
+                                                   COLS
+                                                   0
+                                                   0))
+                           (set! typewin (newwin typesize
+                                                 COLS
+                                                 (- LINES typesize)
+                                                 0))
+                           (unlock-mutex sync-mutex))))
+      (sigaction SIGINT aborthandler)
+      (sigaction SIGQUIT aborthandler)
+      ;;; some ncurses setup
+      (cbreak)
+      (noecho)
+      (nonl)
+      (winchhandler #f) ;; Call the handler once to get the screen
+      ;; size and setup the windows.
+      (scrollok stdscr #f)
+      (scrollok scrollwin #t)
+      (scrollok typewin #f)
+      (leaveok stdscr #t)
+      (leaveok scrollwin #t)
+      (leaveok typewin #f)
+      (keypad typewin #t)
+      (nodelay typewin #t)
+      (clear)
+      (sigaction SIGWINCH winchhandler)
+      ;; 2 Threads now:
+      (let* ((scroller
+              (begin-thread
+               (let loop ()
+                    (lock-mutex sync-mutex)
+                    (let ((type-yx (getyx typewin)))
+                      (wmove scrollwin 0 0)
+                      (set! lines (get-new-lines sock nick lines))
+                      (for-each (lambda (line)
+                                  (waddstr scrollwin line)
+                                  (waddstr scrollwin
+                                           (make-string 1
+                                                        #\newline)))
+                                lines)
+                      (wrefresh scrollwin)
+                      (wrefresh typewin)
+                      (wmove typewin
+                             (car type-yx)
+                             (cdr type-yx)))
+                    (unlock-mutex sync-mutex)
+                    (sleep 1)
+                    (if (not FINISHED)
+                        (loop))))))
+        (let loop ()
+             (lock-mutex sync-mutex)
+             (wclear typewin)
+             (wmove typewin 0 0)
+             (wstandout typewin)
+             (waddstr typewin nick)
+             (wstandend typewin)
+             (waddstr typewin ">> ")
+             (wrefresh typewin)
+             (unlock-mutex sync-mutex)
+             (set! line (enter-string typewin))
              (if (not (string-null? line))
-               (send-public sock nick line)
+                 (send-public sock nick line))
+             (if FINISHED
+               (begin
+                (join-thread scroller)
+                (restore-signals)
+                (if (not DEBUGGING)
+                    (logoff sock nick))
+                (endwin)
+                (primitive-exit))
                (loop)))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.4  2003/04/09 15:46:16  friedel
+;;; Forked version (with totally garbled screen output!)
+;;;
 ;;; Revision 1.3  2003/04/09 15:09:50  friedel
 ;;; logon with hidden input! :)
 ;;;
