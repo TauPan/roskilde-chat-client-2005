@@ -1,11 +1,11 @@
 #!/usr/local/bin/guile \
 --debug -e main -s
 !#
-;;; $Id: chat.scm,v 1.7 2003/04/11 13:25:45 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.8 2003/04/11 19:43:57 friedel Exp friedel $
 
 ;;; A little configuration:
 (define default-nick "Friedel")
-(define DEBUGGING #f)
+(define DEBUGGING #t)
 
 ;;; Global constants (should not be modified)
 (define admin-nick "Administrator")
@@ -313,7 +313,7 @@
                    x)))))
     (let rec-edit ((strpos 0)
                    (line ""))
-         (usleep 100000) ; 1/10 s
+         (usleep 10000) ; 1/100 s
 ;         (display (format #f "l: ~s~%" line)
 ;                  (current-error-port))
          (let* ((liney (quotient strpos width))
@@ -447,8 +447,13 @@
           (COLS 80)
           (LINES 24)
           (scrollwin #f)
-          (typewin #f))
-      (letrec ((winchhandler (lambda (x)
+          (typewin #f)
+          (REDRAWLINES #f)
+          (REDRAWEDIT #f))
+      (letrec ((redraw (lambda ()
+                         (set! REDRAWLINES #t)
+                         (set! REDRAWEDIT #t)))
+               (winchhandler (lambda (x)
                                (lock-mutex sync-mutex)
                                (let ((columns (getenv "COLUMNS"))
                                      (lines (getenv "LINES")))
@@ -467,6 +472,7 @@
                                                      COLS
                                                      (- LINES typesize)
                                                      0))
+                               (redraw)
                                (unlock-mutex sync-mutex)))
                (ignore-all-signals (lambda ()
                                      (sigaction SIGCONT SIG_IGN)
@@ -507,24 +513,33 @@
                                                            '())))
                             (display (format #f "New lines: ~s~%~%" newlines)
                                      (current-error-port))
-                            (lock-mutex sync-mutex)
-                            (for-each (lambda (line)
-                                        (waddstr scrollwin
-                                                 (make-string 1
-                                                              #\newline))
-                                        (waddstr scrollwin line))
-                                      (reverse newlines))
-                            (wrefresh scrollwin)
-                            (unlock-mutex sync-mutex)
-                            (sleep 1)
-                            (if (not FINISHED)
-                                (let ((oldlines (appendmax (* 2 LINES)
-                                                           newlines
-                                                           lines)))
-                                  (loop oldlines
-                                    (get-new-lines sock
-                                                   nick
-                                                   oldlines))))))))
+                            (let ((drawlines (if REDRAWLINES
+                                                 (begin
+                                                  (werase scrollwin)
+                                                  (wmove scrollwin 0 0)
+                                                  (set! REDRAWLINES #f)
+                                                  (appendmax LINES
+                                                             newlines
+                                                             lines))
+                                               newlines)))
+                              (lock-mutex sync-mutex)
+                              (for-each (lambda (line)
+                                          (waddstr scrollwin
+                                                   (make-string 1
+                                                                #\newline))
+                                          (waddstr scrollwin line))
+                                        (reverse drawlines))
+                              (wrefresh scrollwin)
+                              (unlock-mutex sync-mutex)
+                              (sleep 4)
+                              (if (not FINISHED)
+                                  (let ((oldlines (appendmax (* 2 LINES)
+                                                             newlines
+                                                             lines)))
+                                    (loop oldlines
+                                      (get-new-lines sock
+                                                     nick
+                                                     oldlines)))))))))
                 (let loop ()
                      (lock-mutex sync-mutex)
                      (wclear typewin)
@@ -549,6 +564,9 @@
                        (loop))))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.8  2003/04/11 19:43:57  friedel
+;;; Reduced CPU time now... usleep was in the wrong place *Wheee!* :)
+;;;
 ;;; Revision 1.7  2003/04/11 13:25:45  friedel
 ;;; Hm, fixed some bugs. Now it's possible to have a normal chat.
 ;;;
