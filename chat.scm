@@ -1,7 +1,7 @@
 #!/usr/local/bin/guile \
 --debug -e main -s
 !#
-;;; $Id: chat.scm,v 1.2 2003/04/09 13:35:10 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.3 2003/04/09 15:09:50 friedel Exp friedel $
 
 (define default-nick "Friedel")
 
@@ -235,6 +235,13 @@
                                  login-arg nick)
                   sock))
 
+(define (get-new-lines sock nick lines)
+  ;; No check for now
+  (let ((get-url (make-retrieve-url nick))
+        (sock (connect-chat server-url server-port)))
+    (display (http-get-request server-url get-url)
+             sock)
+    (get-response sock "^&message=")))
 
 ;;; Main
 
@@ -245,6 +252,7 @@
   ;;; FIXME: Parse command line arguments
     (let* ((sock '())
            (nick default-nick)
+           (lines '())
            (line "")
            (sighandler (lambda (x)
                          (restore-signals)
@@ -262,16 +270,26 @@
                                      " has just logged in"))
       (sigaction SIGINT sighandler)
       (sigaction SIGQUIT sighandler)
-      (let loop ()
-         ;;; FIXME: This needs to use select for the local input, and
-         ;;; we should poll regularly if there's new input available
-           (get-text sock nick)
-           (set! line (read-line))
-           (if (not (string-null? line))
-               (send-public sock nick line))
-           (loop)))))
+      (set-port-column! (current-output-port) 0)
+      (set-port-line! (current-output-port) 0)
+      (if (> (primitive-fork) 0)
+          (let loop () ;parent
+               (set! lines (get-new-lines sock nick lines))
+               (for-each (lambda (line)
+                           (display line)
+                           (newline)) lines)
+               (sleep 1)
+               (loop))
+        (let loop () ; child
+             (set! line (read-line))
+             (if (not (string-null? line))
+               (send-public sock nick line)
+               (loop)))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.3  2003/04/09 15:09:50  friedel
+;;; logon with hidden input! :)
+;;;
 ;;; Revision 1.2  2003/04/09 13:35:10  friedel
 ;;; Refactoring
 ;;;
