@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.33 2003/05/03 09:30:37 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.34 2003/05/03 10:06:30 friedel Exp friedel $
 ;;; There's no documentation. But the changelog at the bottom of the
 ;;; file should give useful hints.
 
@@ -15,9 +15,6 @@ exec guile --debug -e main -s $0 $@
                                         ; on the  server
 (define NEXT-CHARACTER-SLEEP 5000) ; 5/1000 s ; usecs to wait before next
                                         ; character is accepted
-(define WINCH-PROTECT-TIMEOUT 100000) ; 1/10 s ; usecs we need before
-                                        ; we assume there will be no
-                                        ; further WINCH signals
 
 ;;; Global constants (should not be modified)
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -79,7 +76,6 @@ exec guile --debug -e main -s $0 $@
 (define FINISHED #f)   ; it #t, client will terminate
 ;; (define REDRAWEDIT #f) ; if #t, editing area is fully redrawn
 (define REDRAWLINES #f); if #t, text area is fully redrawn
-(define RESETWINDOWS #f) ; if #t, all windows are recreated
 
 (define PASSWORD "")   ; we have to memorize the password because we
                                         ; need to re-authenticate
@@ -479,14 +475,12 @@ exec guile --debug -e main -s $0 $@
                             (wclrtoeol window)
                             (wmove window 0 x)
                             (wrefresh window))
-                (let ((c (wgetch window))) ; get a character
+                (let ((c (with-mutex mutex-curses ; get a character
+                                     (wgetch window))))
                   (if (or FINISHED
                           (equal? c #\cr)) ; line complete
                       (history-access 'add line)
                     (case c             ; examine character
-                      ((key-resize)     ; window resized
-                        (set! width (getmaxx window))
-                        (rec-edit strpos line))
                       ((#\eot key-dc)   ; delete forwards
                        (rec-edit strpos
                                  (string-append
@@ -552,7 +546,8 @@ exec guile --debug -e main -s $0 $@
                                          line))
                       ((#\esc)          ; esc prefix keymap:
                                         ; (or Meta)
-                       (case (wgetch window)
+                       (case (with-mutex mutex-curses
+                                         (wgetch window))
                          ((#\f key-right) ; next word
                           (rec-edit (afterword)
                                     line))
@@ -734,9 +729,6 @@ exec guile --debug -e main -s $0 $@
     (set! REDRAWLINES #t)
 ;;    (set! REDRAWEDIT #t))
     ))
-
-(define (resetwindows)
-  (set! RESETWINDOWS #t))
 
 ;;; Parser for entered line, checks for command-character at the start
 ;;; of the line
@@ -942,11 +934,6 @@ exec guile --debug -e main -s $0 $@
               (keypad typewin #t)
               (nodelay typewin #t)
               (redraw)))
-           (winchhandler
-            (lambda (x)
-              (sigaction SIGWINCH SIG_IGN)
-              (resetwindows)
-              (sigaction SIGWINCH winchhandler)))
            (aborthandler
             (lambda (x)
               (ignore-all-signals)
@@ -962,7 +949,7 @@ exec guile --debug -e main -s $0 $@
               (sigaction SIGQUIT SIG_IGN)))
            (set-handlers
             (lambda ()
-              (sigaction SIGWINCH winchhandler)
+              (sigaction SIGWINCH SIG_IGN)
               (sigaction SIGCONT conthandler)
               (sigaction SIGINT aborthandler)
               (sigaction SIGQUIT aborthandler)))
@@ -999,15 +986,16 @@ exec guile --debug -e main -s $0 $@
                                                    '())))
                     (append-log-maybe (reverse newlines))
                     (let ((drawlines (if REDRAWLINES
-                                         (with-mutex mutex-curses
-                                                     (ignore-all-signals)
-                                                     (werase scrollwin)
-                                                     (wmove scrollwin 0 0)
-                                                     (set-handlers)
-                                                     (set! REDRAWLINES #f)
-                                                     (appendmax LINES
-                                                                newlines
-                                                                lines))
+                                         (begin
+                                          (with-mutex mutex-curses
+                                                      (ignore-all-signals)
+                                                      (werase scrollwin)
+                                                      (wmove scrollwin 0 0))
+                                          (set-handlers)
+                                          (set! REDRAWLINES #f)
+                                          (appendmax LINES
+                                                     newlines
+                                                     lines))
                                        newlines)))
                       (with-mutex mutex-curses
                                   (for-each
@@ -1053,17 +1041,6 @@ exec guile --debug -e main -s $0 $@
                             (sleep REFRESH-LINES-TIMEOUT)))))
             (while (not FINISHED)
               (with-mutex mutex-curses
-                          (if RESETWINDOWS
-                              (begin
-                               (while RESETWINDOWS ; Shrug off
-                                        ; consecutive WINCH signals
-                                 (set! RESETWINDOWS #f)
-                                 (usleep WINCH-PROTECT-TIMEOUT))
-                               (ignore-all-signals)
-                               (set-window-size)
-                               (redraw)
-                               (set-handlers)
-                               (ungetch 'key-resize)))
                           (wclear typewin)
                           (wmove typewin 0 0)
                           (wstandout typewin)
@@ -1099,6 +1076,10 @@ exec guile --debug -e main -s $0 $@
             (primitive-exit))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.34  2003/05/03 10:06:30  friedel
+;;; Changed history behaviour to push the most recent line always to the
+;;; front.
+;;;
 ;;; Revision 1.33  2003/05/03 09:30:37  friedel
 ;;; Re-sorted the functions (man it's time I modularized this beast),
 ;;; renamed mutexes to reflect their use (there's mutex-curses and
