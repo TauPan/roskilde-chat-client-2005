@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.14 2003/04/15 12:13:09 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.15 2003/04/15 14:46:09 friedel Exp friedel $
 
 ;;; A little configuration:
 (define default-nick "Friedel")
@@ -199,46 +199,45 @@ exec guile --debug -e main -s $0 $@
   <port> on <server-name>"
   (let* ((entry (gethostbyname server-url))
          (addrs (array-ref entry 4))
-         (addr (car addrs))
-         (sock (socket AF_INET SOCK_STREAM 0)))
+         (addr (car addrs)))
     (letrec ((connectme
               (lambda ()
-                (if (port-closed? sock)
-                    (set! sock (socket AF_INET SOCK_STREAM 0)))
-                (if (connect sock AF_INET addr port)
-                    (setvbuf sock _IOLBF)
-                  (error "Could not connect!"))))
+                (let ((sock (socket AF_INET SOCK_STREAM 0)))
+                  (if (connect sock AF_INET addr port)
+                      (begin
+                       (setvbuf sock _IOLBF)
+                       sock)
+                    (error "Could not connect!")))))
              (handler
               (lambda (key . args)
-                (format (current-error-port)  "Warning: ~s failed.~%" (car args))
-                (format (current-error-port) (cadr args) (cddr args))
+                (format (current-error-port)
+                        "Warning: ~s failed.~%"
+                        (car args))
+                (format (current-error-port)
+                        (cadr args)
+                        (cddr args))
                 (newline (current-error-port))))
              (connector
               (lambda () (catch 'system-error
                            connectme
-                           handler)
-                sock)))
+                           handler))))
             connector)))
 
 (define connect-chat (get-connector server-url server-port))
 
 (define (send-to-chatserver request)
   "Send request to chatserver, ignore the response"
-  (lock-mutex sync-mutex)
   (let ((sock (connect-chat)))
     (display request sock)
-    (flush-response sock)
-    (unlock-mutex sync-mutex)))
+    (flush-response sock)))
 
 (define (get-from-chatserver request regex)
   "Send get-request to chatserver, return the list of response lines,
   filtered by drop-before-match"
-  (lock-mutex sync-mutex)
   (let ((sock (connect-chat))
         (response #f))
     (display request sock)
     (set! response (get-response sock regex))
-    (unlock-mutex sync-mutex)
     response))
 
 (define (send-msg nick msgstring from to)
@@ -341,7 +340,6 @@ exec guile --debug -e main -s $0 $@
 
 (define (get-new-lines sock nick lines)
   "Get new lines in chat"
-  (lock-mutex sync-mutex)
   (let ((get-url (make-retrieve-url nick))
         (sock (connect-chat))
         (response #f))
@@ -358,7 +356,6 @@ exec guile --debug -e main -s $0 $@
                 (set! response (reverse newlines)))
              (loop (get-next-line sock)
                (cons line newlines)))))
-    (unlock-mutex sync-mutex)
     response))
 
 (define (get-nick)
@@ -728,6 +725,9 @@ exec guile --debug -e main -s $0 $@
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.15  2003/04/15 14:46:09  friedel
+;;; Added commands: help, login, logoff, fakemsg, fakepub
+;;;
 ;;; Revision 1.14  2003/04/15 12:13:09  friedel
 ;;; Another bug in parse-user-input
 ;;;
