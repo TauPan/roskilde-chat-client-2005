@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.24 2003/04/22 14:46:34 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.25 2003/04/22 15:12:15 friedel Exp friedel $
 ;;; There's no documentation. But the changelog at the bottom of the
 ;;; file should give useful hints.
 
@@ -489,7 +489,19 @@ exec guile --debug -e main -s $0 $@
                                 0))
                      (x (- (+ strpos
                               (cdr startpos))
-                           linepos)))
+                           linepos))
+                     (prevwordstart (lambda ()
+                                      (+1< (or (string-rindex line
+                                                              #\space
+                                                              0
+                                                              (-1>0 strpos))
+                                               0)
+                                           len)))
+                     (afterword (lambda ()
+                                  (or (string-index line
+                                                    #\space
+                                                    (+1< strpos len))
+                                      len))))
                 (lock-mutex sync-mutex)
                 ;; Draw the line
                 (wmove window (car startpos) (cdr startpos))
@@ -507,7 +519,7 @@ exec guile --debug -e main -s $0 $@
                           (equal? c #\cr));; line complete
                       (history-access 'add line)
                     (case c;; examine character
-                      ((#\eot);; delete forwards
+                      ((#\eot key-dc);; delete forwards
                        (rec-edit strpos
                                  (string-append
                                   (substring line
@@ -569,6 +581,44 @@ exec guile --debug -e main -s $0 $@
                                          line))
                       ((#\enq) (rec-edit len;; ctrl-e
                                          line))
+                      ((#\esc);; esc prefix keymap:
+                                        ; (or Meta)
+                       (case (wgetch window)
+                         ((#\f key-right);; next word
+                          (rec-edit (afterword)
+                                    line))
+                         ((#\b key-left);; previous word
+                          (rec-edit (prevwordstart)
+                                    line))
+                         ((#\d key-dc);; delete next word
+                          (begin
+                           (set! cutbuffer
+                                 (substring line
+                                            strpos
+                                            (afterword)))
+                           (rec-edit
+                            strpos
+                            (string-append (substring line
+                                                      0
+                                                      strpos)
+                                           (substring line
+                                                      (afterword)
+                                                      len)))))
+                         ((key-backspace #\del #\bs);;del prevword
+                          (begin
+                           (set! cutbuffer
+                                 (substring line
+                                            (prevwordstart)
+                                            strpos))
+                           (rec-edit (prevwordstart)
+                                     (string-append (substring
+                                                     line
+                                                     0
+                                                     (prevwordstart))
+                                                    (substring line
+                                                               strpos
+                                                               len)))))
+                         (else (rec-edit strpos line))))
                       (else (if (char? c);; entered char
                                 (rec-edit (+1< strpos textlen)
                                           (string-append
@@ -938,6 +988,10 @@ exec guile --debug -e main -s $0 $@
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.25  2003/04/22 15:12:15  friedel
+;;; Fixed editor behaviour when going back (with key-left or ctrl-b),
+;;; history jumps to end of line, sanitized history behaviour (a little)
+;;;
 ;;; Revision 1.24  2003/04/22 14:46:34  friedel
 ;;; Working history (more or less the behaviour i'd expect)
 ;;;
