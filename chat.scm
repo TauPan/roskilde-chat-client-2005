@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.29 2003/04/27 10:44:46 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.30 2003/04/28 16:19:34 friedel Exp friedel $
 ;;; There's no documentation. But the changelog at the bottom of the
 ;;; file should give useful hints.
 
@@ -700,9 +700,12 @@ exec guile --debug -e main -s $0 $@
       true; do nothing
     (let* ((command-end (string-index line #\space))
            (command-args (string-split line #\space))
-           (command (substring (car command-args)
-                               1
-                               (string-length (car command-args))))
+           (command (if (> (string-length (car command-args))
+                           0)
+                        (substring (car command-args)
+                                   1
+                                   (string-length (car command-args)))
+                      ""))
            (args (cdr command-args))
            (rest-from
             (lambda (n)
@@ -1019,6 +1022,10 @@ exec guile --debug -e main -s $0 $@
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.30  2003/04/28 16:19:34  friedel
+;;; Introduced a small wait (1/10 s) before update after line is entered
+;;; to give the chatserver a fair chance to get the line :)
+;;;
 ;;; Revision 1.29  2003/04/27 10:44:46  friedel
 ;;; Entering a line causes immediate screen update,
 ;;; corrected comment conventions,
