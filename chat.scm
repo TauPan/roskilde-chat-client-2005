@@ -1,11 +1,9 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.15 2003/04/15 14:46:09 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.16 2003/04/15 17:47:36 friedel Exp friedel $
 
 ;;; A little configuration:
-(define default-nick "Friedel")
-(define DEBUGGING #f)
 
 ;;; Global constants (should not be modified)
 (define admin-nick "Administrator")
@@ -44,7 +42,12 @@ exec guile --debug -e main -s $0 $@
 (use-modules (srfi srfi-1)
              (ice-9 regex)
              (ice-9 threads)
-             (ice-9 format))
+             (ice-9 format)
+             (ice-9 getopt-long))
+
+;;; Get options, they won't change:
+(define OPTIONS (getopt-long (command-line)
+                             '((nologin (single-char #\n)))))
 
 ;;; GLOBAL VARIABLES! EVIL! :)
 (define sync-mutex (make-mutex)) ; Global mutex, 2 threads. Should be
@@ -54,7 +57,6 @@ exec guile --debug -e main -s $0 $@
 (define REDRAWLINES #f); if #t, text area is fully redrawn
 (define PASSWORD "")   ; we have to memorize the password because we
                                         ; need to re-authenticate
-
 ;;; End of variables
 
 (dynamic-link "libncurses.so")
@@ -360,11 +362,12 @@ exec guile --debug -e main -s $0 $@
 
 (define (get-nick)
   "Get the nick to connect as"
-  (if (not (null? (cdr (command-line))))
-      (cadr (command-line))
-    (begin
-     (display "Nick: ")
-     (read-line))))
+  (let ((cmdargs (option-ref OPTIONS '() #f)))
+    (if cmdargs
+        (car cmdargs)
+      (begin
+       (display "Nick: ")
+       (read-line)))))
 
 (define (enter-string window)
   "Read a string from an ncurses window"
@@ -649,15 +652,17 @@ exec guile --debug -e main -s $0 $@
               (set-handlers)))
            (trylogin
             (lambda ()
-              (if (not DEBUGGING)
+              (if (not (option-ref OPTIONS 'nologin #f))
                   (begin
                    (while
                        (not (login
                              nick
-                             (begin (set! PASSWORD (getpass (format #f
-                                                                    "Password for ~a: "
-                                                                    nick)))
-                                    PASSWORD)))
+                             (begin
+                              (set! PASSWORD
+                                    (getpass (format #f
+                                                     "Password for ~a: "
+                                                     nick)))
+                              PASSWORD)))
                      (display "Sorry, Try again!")
                      (newline))
                    (send-admin-msg
@@ -718,13 +723,21 @@ exec guile --debug -e main -s $0 $@
                      (begin
                       (join-thread scroller)
                       (restore-signals)
-                      (if (not DEBUGGING)
+                      (if (not (option-ref OPTIONS
+                                           'nologin
+                                           #f))
                           (logoff nick))
                       (endwin)
                       (primitive-exit))
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.16  2003/04/15 17:47:36  friedel
+;;; Make get-connector be a little less smart and just give out new
+;;; sockets every time (which will be garbage-collected eventually). This
+;;; removes the need for mutex locks around network io (because multiple
+;;; sockets can be used)
+;;;
 ;;; Revision 1.15  2003/04/15 14:46:09  friedel
 ;;; Added commands: help, login, logoff, fakemsg, fakepub
 ;;;
