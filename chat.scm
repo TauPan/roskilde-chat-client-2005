@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.32 2003/04/29 14:36:31 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.33 2003/05/03 09:30:37 friedel Exp friedel $
 ;;; There's no documentation. But the changelog at the bottom of the
 ;;; file should give useful hints.
 
@@ -406,9 +406,7 @@ exec guile --debug -e main -s $0 $@
         (pos 0))                        ; position
     (lambda (direction line)
       (let* ((newhist (if (not (eq? direction 'reset))
-                          (if (zero? pos)
-                              (cons line (delete line history))
-                            (newinsert line history pos))
+                          (cons line (delete line history))
                         history))
              (newlen (length newhist))
              (added (not (= (length history)
@@ -1101,6 +1099,12 @@ exec guile --debug -e main -s $0 $@
             (primitive-exit))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.33  2003/05/03 09:30:37  friedel
+;;; Re-sorted the functions (man it's time I modularized this beast),
+;;; renamed mutexes to reflect their use (there's mutex-curses and
+;;; mutex-format now), the /login command will now announce the login,
+;;; there's a new /qlogin command that will login quietly.
+;;;
 ;;; Revision 1.32  2003/04/29 14:36:31  friedel
 ;;; Prevented immediate segfault after several WINCHs. (although chat.scm
 ;;; segfaults on termination)
