@@ -1,11 +1,11 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.10 2003/04/12 01:12:26 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.11 2003/04/13 22:11:48 friedel Exp friedel $
 
 ;;; A little configuration:
 (define default-nick "Friedel")
-(define DEBUGGING #f)
+(define DEBUGGING #t)
 
 ;;; Global constants (should not be modified)
 (define admin-nick "Administrator")
@@ -23,6 +23,7 @@ exec guile --debug -e main -s $0 $@
 (define online-url "RFChatOnline.php")
 (define login-url "RFChatLogin.php")
 (define logoff-url "RFChatRemoveOnline.php")
+(define userlist-url "RFChatPrivate.php")
 
 (define rand-arg "random")
 (define nick-arg "name")
@@ -102,6 +103,9 @@ exec guile --debug -e main -s $0 $@
 
 
 (define (list->alist lst)
+  "Convert lst with even number of elements to an alist, using the
+  elements at uneven positions as car and the others as cdr for each
+  pair"
   (if (null? lst)
       '()
     (let ((rest (cdr lst)))
@@ -133,6 +137,7 @@ exec guile --debug -e main -s $0 $@
 
 ;;; FIXME: New parameter: timestamp for optional Only-If-Newer Header
 (define (http-get-request host url)
+  "Build a http-request for url on host"
   (string-append "GET "
                  url
                  " HTTP/1.0\r\n"
@@ -141,6 +146,8 @@ exec guile --debug -e main -s $0 $@
                  "\r\n"))
 
 (define (http-get-args host base script . args)
+  "call http-get-request to host with url built by
+  make-base-script-args"
   (http-get-request host
                     (make-base-script-args base script
                                     (list->alist args))))
@@ -177,44 +184,61 @@ exec guile --debug -e main -s $0 $@
 
 
 (define (current-date-and-time)
+  "Return the date+time string in the format the roskilde
+  webchat-server uses"
   (strftime "%T, %Y-%m-%d" (gmtime (current-time))))
 
 ;;; Network and other IO
 
 (define (get-connector server-name port)
+  "Return a thunk that will return a connected socket to
+  <port> on <server-name>"
   (let* ((entry (gethostbyname server-url))
          (addrs (array-ref entry 4))
          (addr (car addrs))
          (sock (socket AF_INET SOCK_STREAM 0)))
-    (letrec ((connectme (lambda ()
-                          (if (port-closed? sock)
-                              (set! sock (socket AF_INET SOCK_STREAM 0)))
-                          (if (connect sock AF_INET addr port)
-                              (setvbuf sock _IOLBF)
-                            (error "Could not connect!"))))
-             (handler (lambda (key . args)
-                        (format #t "Warning: ~s failed.~%" (car args))
-                        (format #t (cadr args) (cddr args))
-                        (newline)))
-             (connector (lambda () (catch 'system-error
-                                     connectme
-                                     handler)
-                          sock)))
+    (letrec ((connectme
+              (lambda ()
+                (if (port-closed? sock)
+                    (set! sock (socket AF_INET SOCK_STREAM 0)))
+                (if (connect sock AF_INET addr port)
+                    (setvbuf sock _IOLBF)
+                  (error "Could not connect!"))))
+             (handler
+              (lambda (key . args)
+                (format #t "Warning: ~s failed.~%" (car args))
+                (format #t (cadr args) (cddr args))
+                (newline)))
+             (connector
+              (lambda () (catch 'system-error
+                           connectme
+                           handler)
+                sock)))
             connector)))
 
 (define connect-chat (get-connector server-url server-port))
 
-(define (send-to-server request sock)
+(define (send-to-chatserver request)
+  "Send request to chatserver, ignore the response"
   (let ((sock (connect-chat)))
     (display request sock)
     (flush-response sock)))
 
+(define (get-from-chatserver request regex)
+  "Send get-request to chatserver, return the list of response lines,
+  filtered by drop-before-match"
+  (let ((sock (connect-chat)))
+    (display request sock)
+    (get-response sock regex)))
+
 (define (send-msg sock nick msgstring from to)
+  "Send the message with text <msgstring> as name <nick> from <from>
+  to <to>"
   (let ((get-url (make-msg-url nick msgstring from to)))
-    (send-to-server (http-get-request server-url get-url)
-             sock)))
+    (send-to-chatserver (http-get-request server-url get-url))))
 
 (define (send-public sock nick msgstring)
+  "Send a public message as <nick>"
   (send-msg sock nick msgstring nick default-to-arg))
 
 (define (get-response-lines sock)
@@ -232,6 +256,7 @@ exec guile --debug -e main -s $0 $@
     (reverse response)))
 
 (define (get-response sock regex)
+  "return text response from webserver, filtered by drop-before-match"
   (drop-before-match (get-response-lines sock)
                      regex
                      #t))
@@ -239,31 +264,46 @@ exec guile --debug -e main -s $0 $@
 (define flush-response close-port)
 
 (define (send-admin-msg sock message)
+  "Send a message as Administrator"
       (send-msg sock
               admin-nick
               message
               admin-nick
               default-to-arg))
 
-(define (login sock nick pw)
+(define (login nick pw)
   "Send login message to server, return #t if 'ok', #f otherwise"
-  (let ((sock (connect-chat)))
-    (display (http-get-args server-url
-                            base-url login-url
-                            rand-arg (chat-random)
-                            login-arg nick
-                            password-arg pw)
-             sock)
-    (string=? "ok&" (car (get-response sock "^&entry=")))))
+  (string=? "ok&"
+            (car (get-from-chatserver (http-get-args server-url
+                                                     base-url login-url
+                                                     rand-arg (chat-random)
+                                                     login-arg nick
+                                                     password-arg pw)
+                                      "^&entry="))))
 
-(define (logoff sock nick)
-  (send-to-server (http-get-args server-url
-                                 base-url logoff-url
-                                 rand-arg (chat-random)
-                                 login-arg nick)
-                  sock))
+(define (logoff nick)
+  "Remove <nick> from Chat"
+  (send-to-chatserver (http-get-args server-url
+                                     base-url logoff-url
+                                     rand-arg (chat-random)
+                                     login-arg nick)))
+
+(define (users)
+  "Get list of users from chatserver"
+  (let* ((rawlist (car (get-from-chatserver (http-get-args server-url
+                                                           base-url
+                                                           userlist-url
+                                                           rand-arg
+                                                           (chat-random))
+                                            "^&users=")))
+         (cutraw (substring rawlist 0 (1- (string-length rawlist)))))
+    (delete1! "-1"
+            (delete1! default-to-arg
+                    (string-split cutraw #\,)))))
 
 (define (get-first-line sock message-re)
+  "Get first line containing text matching <message-re> (with the
+  match removed)"
   (let loop ((answer #f)
              (matcher #f))
        (cond ((eof-object? answer) #f);; Failure to match
@@ -284,6 +324,7 @@ exec guile --debug -e main -s $0 $@
                      (loop newans newmatch))))))
 
 (define (get-next-line sock)
+  "get next line from sock"
   (let ((ans (read-line sock)))
     (if (eof-object? ans)
         #f
@@ -291,6 +332,7 @@ exec guile --debug -e main -s $0 $@
 
 
 (define (get-new-lines sock nick lines)
+  "Get new lines in chat"
   (let ((get-url (make-retrieve-url nick))
         (sock (connect-chat)))
     (display (http-get-request server-url get-url)
@@ -308,6 +350,7 @@ exec guile --debug -e main -s $0 $@
                (cons line newlines)))))))
 
 (define (get-nick)
+  "Get the nick to connect as"
   (if (not (null? (cdr (command-line))))
       (cadr (command-line))
     (begin
@@ -316,77 +359,78 @@ exec guile --debug -e main -s $0 $@
 
 (define (enter-string window)
   "Read a string from an ncurses window"
-  (let ((startpos (getyx window))
-        (width (getmaxx window))
-        (length (getmaxy window))
-        (-1>0 (lambda (x)
-                (let ((newx (1- x)))
-                  (if (< newx 0)
-                      x
-                    newx))))
-        (+1< (lambda (x max)
-               (let ((newx (1+ x)))
-                 (if (< newx max)
-                     newx
-                   x)))))
-    (let rec-edit ((strpos 0)
-                   (line ""))
-         (usleep 10000)                 ; 1/100 s
-;         (display (format #f "l: ~s~%" line)
-;                  (current-error-port))
-         (let* ((liney (quotient strpos width))
-                (y  (+ liney
-                       (car startpos)))
-                (x (if (zero? liney)
-                       (+ strpos (cdr startpos))
-                     (- strpos (* liney width))))
-                (len (string-length line)))
-           (lock-mutex sync-mutex)
-           (if REDRAWEDIT
-               (begin
-                (wmove window (car startpos) (cdr startpos))
-                (waddstr window line)
-                (set! REDRAWEDIT #f))
-             (begin
-              (wmove window y (-1>0 x))
-              (waddstr window
-                       (substring line
-                                  (-1>0 strpos)
-                                  len))))
-           (wclrtoeol window)
-           (wmove window y x)
-           (wrefresh window)
-           (unlock-mutex sync-mutex)
-           (let ((c (wgetch window)))
-;             (display (format #f "c: ~s~%" c)
-;                      (current-error-port))
-             (if (or FINISHED
-                     (equal? c #\cr))
-                 line
-               (case c
-                 ((key-backspace #\del #\bs) ;; delete backwards
-                  (rec-edit (-1>0 strpos)
-                            (string-append
-                             (substring line
-                                        0
-                                        (-1>0 strpos))
-                             (substring line
-                                        (+1< strpos len)
-                                        len))))
-                 ((#\etx) (make-command-string "quit")) ;; ctrl-c
-                 ((#\sub) (make-command-string "stop")) ;; ctrl-z
-                 (else (if (char? c) ;; entered char
-                           (rec-edit (+1< strpos width)
-                                     (string-append
-                                      (substring line
-                                                 0
-                                                 strpos)
-                                      (make-string 1 c)
-                                      (substring line
-                                                 (+1< strpos len)
-                                                 len)))
-                         (rec-edit strpos
-                                   line))))))))))
+  (letrec ((startpos (getyx window))
+           (width (getmaxx window))
+           (length (getmaxy window))
+           (-1>0
+            (lambda (x)
+              (let ((newx (1- x)))
+                (if (< newx 0)
+                    x
+                  newx))))
+           (+1<
+            (lambda (x max)
+              (let ((newx (1+ x)))
+                (if (< newx max)
+                    newx
+                  x))))
+           (rec-edit ;; the infamous recursive editor function
+            (lambda (strpos line)
+              (usleep 10000)            ; 1/100 s
+              (let* ((liney (quotient (+ strpos (cdr startpos))
+                                      width))
+                     (y  (+ liney
+                            (car startpos)))
+                     (x (if (zero? liney)
+                            (+ strpos (cdr startpos))
+                          (- strpos (* liney width))))
+                     (len (string-length line)))
+                (lock-mutex sync-mutex)
+                ;; Draw the (changed part of the) line
+                (if REDRAWEDIT ;; draw everything
+                    (begin
+                     (wmove window (car startpos) (cdr startpos))
+                     (waddstr window line)
+                     (set! REDRAWEDIT #f))
+                  (begin ;; draw the tail
+                   (wmove window y (-1>0 x))
+                   (waddstr window
+                            (substring line
+                                       (-1>0 strpos)
+                                       len))))
+                (wclrtoeol window)
+                (wmove window y x)
+                (wrefresh window)
+                (unlock-mutex sync-mutex)
+                (let ((c (wgetch window))) ;; get a character
+                  (if (or FINISHED
+                          (equal? c #\cr)) ;; line complete
+                      line
+                    (case c ;; examine character
+                      ((key-backspace #\del #\bs);; delete backwards
+                       (rec-edit (-1>0 strpos)
+                                 (string-append
+                                  (substring line
+                                             0
+                                             (-1>0 strpos))
+                                  (substring line
+                                             (+1< strpos len)
+                                             len))))
+                      ((#\etx) (make-command-string "quit"));; ctrl-c
+                      ((#\sub) (make-command-string "stop"));; ctrl-z
+                      (else (if (char? c);; entered char
+                                (rec-edit (+1< strpos width)
+                                          (string-append
+                                           (substring line
+                                                      0
+                                                      strpos)
+                                           (make-string 1 c)
+                                           (substring line
+                                                      (+1< strpos len)
+                                                      len)))
+                              (rec-edit strpos
+                                        line))))))))))
+          (rec-edit 0 "")))
 
 ;;; Some list functions
 (define (appendmax max . args)
@@ -397,56 +441,66 @@ exec guile --debug -e main -s $0 $@
         (list-head lst max)
       lst)))
 
+;;; Counterparts to the unix commands true and false:
+(define (true)
+  "true - do nothing, successfully"
+  #t)
+
+(define (false)
+  "false - do nothing, unsuccessfully"
+  #f)
+
 ;;; Parser for entered line, checks for command-character at the start
 ;;; of the line
 (define (parse-user-input line sock nick)
-  ;;very basic commands (operating on the whole line)
-  (let ((sendpub (lambda ()
-                   (send-public sock nick line)))
-        (donothing (lambda () #t)))
-    (if (string-null? line)
-        donothing ;; do nothing
-      (if (char=? (string-ref line 0)
-                  command-c)
-          (let* ((command-end (string-index line #\space))
-                 (command-args (string-split line #\space))
-                 (command (substring (car command-args)
-                                     1
-                                     (string-length (car command-args))))
-                 (args (cdr command-args))
-                 (rest-from (lambda (n)
-                              (let ((joined (fold-right (lambda (x y)
-                                                          (string-append x
-                                                                         " "
-                                                                         y))
-                                                        ""
-                                                        (list-cdr-ref args
-                                                                      n))))
-                                (substring joined
-                                           0
-                                           (1- (string-length
-                                                joined))))))
-                 ;; more sophisticated commands:
-                 (sendmsg (lambda ()
-                            (send-msg sock
-                                      nick
-                                      (rest-from 1)
-                                      nick
-                                      (car args)))))
-            (cond
-             ((string=? command "")
-              sendpub); Line started with <command-c>#\space
-             ((string=? command "quit")
-              (lambda () (set! FINISHED #t)))
-             ((or (string=? command "suspend")
-                  (string=? command "stop"))
-              (lambda () (kill (getpid)
-                               SIGSTOP)))
-             ((string=? command "msg")
-              sendmsg)
-             (else donothing)))
+  "Return a thunk, based on the users command"
+  ;;very basic commands (operating on the whole line or no args):
+  (cond ((string-null? line)
+         true);; do nothing
+        ((char=? (string-ref line 0)
+                 command-c)
+         (letrec ((command-end (string-index line #\space))
+                  (command-args (string-split line #\space))
+                  (command (substring (car command-args)
+                                      1
+                                      (string-length (car command-args))))
+                  (args (cdr command-args))
+                  (rest-from
+                   (lambda (n)
+                     (let ((joined (fold-right (lambda (x y)
+                                                 (string-append x
+                                                                " "
+                                                                y))
+                                               ""
+                                               (list-cdr-ref args
+                                                             n))))
+                       (substring joined
+                                  0
+                                  (1- (string-length joined))))))
+                  ;;; COMMANDS:
+                  (sendpub
+                   (lambda ()
+                     (send-public sock nick line)))
+                  (sendmsg
+                   (lambda ()
+                     (send-msg sock
+                               nick
+                               (rest-from 1)
+                               nick
+                               (car args)))))
+                 (cond
+                  ((string=? command "")
+                   sendpub)             ; Line started with <command-c>#\space
+                  ((string=? command "quit")
+                   (lambda () (set! FINISHED #t)))
+                  ((or (string=? command "suspend")
+                       (string=? command "stop"))
+                   (lambda () (kill (getpid) SIGSTOP)))
+                  ((string=? command "msg")
+                   sendmsg)
+                  (else false))))
         ;; no command, send the line
-        sendpub))))
+        (else sendpub)))
 
 ;;; Main
 
@@ -455,72 +509,68 @@ exec guile --debug -e main -s $0 $@
   (if (not (defined? 'call-with-new-thread))
       (error "Please reconfigure guile with --with-threads and
       recompile and install!"))
-  (let* ((sock '())
-         (nick (get-nick))
-         (line ""))
-    (if (not DEBUGGING)
-        (begin
-         (while (not (login sock
-                            nick
-                            (getpass (format #f
-                                             "Password for ~a: "
-                                             nick))))
-           (display "Sorry, Try again!")
-           (newline))
-         (send-admin-msg sock
-                         (string-append nick
-                                        " has just logged in"))))
-    (let ((stdscr (initscr))
-          (typesize 1)
-          (COLS 80)
-          (LINES 24)
-          (scrollwin #f)
-          (typewin #f)
-          (REDRAWLINES #f))
-      (letrec ((redraw (lambda ()
-                         (set! REDRAWLINES #t)
-                         (set! REDRAWEDIT #t)))
-               (winchhandler (lambda (x)
-                               (lock-mutex sync-mutex)
-                               (let ((columns (getenv "COLUMNS"))
-                                     (lines (getenv "LINES")))
-                                 (set! COLS
-                                       (if columns
-                                           (string->number columns)
-                                         (getmaxx stdscr)))
-                                 (set! LINES (if lines
-                                                 (string->number lines)
-                                               (getmaxy stdscr))))
-                               (set! scrollwin (newwin (- LINES typesize)
-                                                       COLS
-                                                       0
-                                                       0))
-                               (set! typewin (newwin typesize
-                                                     COLS
-                                                     (- LINES typesize)
-                                                     0))
-                               (redraw)
-                               (unlock-mutex sync-mutex)))
-               (ignore-all-signals (lambda ()
-                                     (sigaction SIGCONT SIG_IGN)
-                                     (sigaction SIGINT SIG_IGN)
-                                     (sigaction SIGQUIT SIG_IGN)
-                                     (sigaction SIGWINCH SIG_IGN)))
-               (aborthandler (lambda (x) (set! FINISHED #t)))
-               (conthandler (lambda (x) (set-handlers)))
-               (set-handlers (lambda ()
-                               (sigaction SIGCONT conthandler)
-                               (sigaction SIGINT aborthandler)
-                               (sigaction SIGQUIT aborthandler)
-                               (sigaction SIGWINCH winchhandler))))
+  (letrec ((sock '())
+           (nick (get-nick))
+           (line "")
+           (stdscr (initscr))
+           (typesize 1)
+           (COLS 80)
+           (LINES 24)
+           (scrollwin #f)
+           (typewin #f)
+           (REDRAWLINES #f)
+           (redraw
+            (lambda ()
+              (set! REDRAWLINES #t)
+              (set! REDRAWEDIT #t)))
+           (winchhandler
+            (lambda (x)
+              (lock-mutex sync-mutex)
+              (let ((columns (getenv "COLUMNS"))
+                    (lines (getenv "LINES")))
+                (set! COLS
+                      (if columns
+                          (string->number columns)
+                        (getmaxx stdscr)))
+                (set! LINES (if lines
+                                (string->number lines)
+                              (getmaxy stdscr))))
+              (set! scrollwin (newwin (- LINES typesize)
+                                      COLS
+                                      0
+                                      0))
+              (set! typewin (newwin typesize
+                                    COLS
+                                    (- LINES typesize)
+                                    0))
+              (redraw)
+              (unlock-mutex sync-mutex)))
+           (ignore-all-signals
+            (lambda ()
+              (sigaction SIGCONT SIG_IGN)
+              (sigaction SIGINT SIG_IGN)
+              (sigaction SIGQUIT SIG_IGN)
+              (sigaction SIGWINCH SIG_IGN)))
+           (aborthandler
+            (lambda (x) (set! FINISHED #t)))
+           (conthandler
+            (lambda (x) (set-handlers)))
+           (set-handlers
+            (lambda ()
+              (sigaction SIGCONT conthandler)
+              (sigaction SIGINT aborthandler)
+              (sigaction SIGQUIT aborthandler)
+              (sigaction SIGWINCH winchhandler)))
+           (setup
+            (lambda ()
               (ignore-all-signals)
       ;;; some ncurses setup
               ;; (cbreak)
               (raw);; We parse the control characters!
               (noecho)
               (nonl)
-              (winchhandler #f);; Call the handler once to get the screen
-              ;; size and setup the windows.
+              (winchhandler #f);; Call the handler once to get
+              ;; the screen size and setup the windows.
               (scrollok stdscr #f)
               (scrollok scrollwin #t)
               (scrollok typewin #f)
@@ -530,67 +580,89 @@ exec guile --debug -e main -s $0 $@
               (keypad typewin #t)
               (nodelay typewin #t)
               (clear)
-              (set-handlers)
-              ;; Screen update as a new thread:
-              (let* ((scroller
-                      (begin-thread
-                       (let loop ((lines '())
-                                  (newlines (get-new-lines sock
-                                                           nick
-                                                           '())))
-;                           (display (format #f "New lines: ~s~%~%" newlines)
-;                                    (current-error-port))
-                            (let ((drawlines (if REDRAWLINES
-                                                 (begin
-                                                  (werase scrollwin)
-                                                  (wmove scrollwin 0 0)
-                                                  (set! REDRAWLINES #f)
-                                                  (appendmax LINES
-                                                             newlines
-                                                             lines))
-                                               newlines)))
-                              (lock-mutex sync-mutex)
-                              (for-each (lambda (line)
-                                          (waddstr scrollwin
-                                                   (make-string 1
-                                                                #\newline))
-                                          (waddstr scrollwin line))
-                                        (reverse drawlines))
-                              (wrefresh scrollwin)
-                              (unlock-mutex sync-mutex)
-                              (sleep 2)
-                              (if (not FINISHED)
-                                  (let ((oldlines (appendmax (* 2 LINES)
-                                                             newlines
-                                                             lines)))
-                                    (loop oldlines
-                                      (get-new-lines sock
-                                                     nick
-                                                     oldlines)))))))))
-                (let loop ()
-                     (lock-mutex sync-mutex)
-                     (wclear typewin)
-                     (wmove typewin 0 0)
-                     (wstandout typewin)
-                     (waddstr typewin nick)
-                     (wstandend typewin)
-                     (waddstr typewin " >> ")
-                     (wrefresh typewin)
-                     (unlock-mutex sync-mutex)
-                     (set! line (enter-string typewin))
-                     ((parse-user-input line sock nick)) ; returns a thunk
+              (set-handlers)))
+           (trylogin
+            (lambda ()
+              (if (not DEBUGGING)
+                  (begin
+                   (while
+                       (not (login
+                             nick
+                             (getpass (format #f
+                                              "Password for ~a: "
+                                              nick))))
+                     (display "Sorry, Try again!")
+                     (newline))
+                   (send-admin-msg
+                    sock
+                    (string-append nick
+                                   " has just logged in"))))))
+           (makescroller
+            (lambda ()
+              (begin-thread
+               (let loop ((lines '())
+                          (newlines (get-new-lines sock
+                                                   nick
+                                                   '())))
+                    (let ((drawlines (if REDRAWLINES
+                                         (begin
+                                          (werase scrollwin)
+                                          (wmove scrollwin 0 0)
+                                          (set! REDRAWLINES #f)
+                                          (appendmax LINES
+                                                     newlines
+                                                     lines))
+                                       newlines)))
+                      (lock-mutex sync-mutex)
+                      (for-each (lambda (line)
+                                  (waddstr scrollwin
+                                           (make-string 1
+                                                        #\newline))
+                                  (waddstr scrollwin line))
+                                (reverse drawlines))
+                      (wrefresh scrollwin)
+                      (unlock-mutex sync-mutex)
+                      (sleep 2)
+                      (if (not FINISHED)
+                          (let ((oldlines (appendmax (* 2 LINES)
+                                                     newlines
+                                                     lines)))
+                            (loop oldlines
+                              (get-new-lines sock
+                                             nick
+                                             oldlines))))))))))
+          (let ((scroller (begin
+                           (trylogin)
+                           (setup)
+                           (makescroller))))
+            ;; Screen update as a new thread:
+            (let loop ()
+                 (lock-mutex sync-mutex)
+                 (wclear typewin)
+                 (wmove typewin 0 0)
+                 (wstandout typewin)
+                 (waddstr typewin nick)
+                 (wstandend typewin)
+                 (waddstr typewin " >> ")
+                 (wrefresh typewin)
+                 (unlock-mutex sync-mutex)
+                 (set! line (enter-string typewin))
+                 ((parse-user-input line sock nick)) ; returns a thunk
                                         ; that is executed immediately
-                     (if FINISHED
-                         (begin
-                          (join-thread scroller)
-                          (restore-signals)
-                          (if (not DEBUGGING)
-                              (logoff sock nick))
-                          (endwin)
-                          (primitive-exit))
-                       (loop))))))))
+                 (if FINISHED
+                     (begin
+                      (join-thread scroller)
+                      (restore-signals)
+                      (if (not DEBUGGING)
+                          (logoff nick))
+                      (endwin)
+                      (primitive-exit))
+                   (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.11  2003/04/13 22:11:48  friedel
+;;; cleaned up drop-before-match and connect-chat
+;;;
 ;;; Revision 1.10  2003/04/12 01:12:26  friedel
 ;;; Edit area is refreshed, too. Small cleanups.
 ;;;
