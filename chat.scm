@@ -1,7 +1,7 @@
 #!/usr/local/bin/guile \
 --debug -e main -s
 !#
-;;; $Id: chat.scm,v 1.5 2003/04/11 00:53:22 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.6 2003/04/11 13:03:47 friedel Exp friedel $
 
 ;;; A little configuration:
 (define default-nick "Friedel")
@@ -136,7 +136,7 @@
 (define (make-retrieve-url nick)
   "Return an url to retrieve messages for <nick>"
   (make-args-apply base-url read-url
-                 to-arg (url-encode nick)))
+                 nick-arg (url-encode nick)))
 
 (define (drop-before-match lines regexp remove)
   "drop all lines in <lines> before the first one matching <regexp>.
@@ -358,13 +358,13 @@
                                      (string-length (car command-args))))
                  (args (cdr command-args))
                  (rest-from (lambda (n)
-                              (let ((joined (fold (lambda (x y)
-                                                    (string-append x
-                                                                   " "
-                                                                   y))
-                                                  ""
-                                                  (list-cdr-ref args
-                                                                n))))
+                              (let ((joined (fold-right (lambda (x y)
+                                                          (string-append x
+                                                                         " "
+                                                                         y))
+                                                        ""
+                                                        (list-cdr-ref args
+                                                                      n))))
                                 (substring joined
                                            0
                                            (1- (string-length
@@ -373,7 +373,9 @@
                  (sendmsg (lambda ()
                             (send-msg sock
                                       nick
-                                      (substring (rest-from 2))))))
+                                      (rest-from 1)
+                                      nick
+                                      (car args)))))
             (cond
              ((string=? command "") sendpub);; Line started with <command-c>#\space,
              ((string=? command "quit") (lambda () (set! FINISHED #t)))
@@ -470,6 +472,7 @@
                        (let loop ()
                             (set! lines (get-new-lines sock nick lines))
                             (lock-mutex sync-mutex)
+                            (werase scrollwin)
                             (wmove scrollwin 0 0)
                             (for-each (lambda (line)
                                         (waddstr scrollwin line)
@@ -506,6 +509,9 @@
                        (loop))))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.6  2003/04/11 13:03:47  friedel
+;;; First version with all the basic features. Next step: cleaning up.
+;;;
 ;;; Revision 1.5  2003/04/11 00:53:22  friedel
 ;;; Threaded version with own low-level recursive edit (*Phew!*)
 ;;;
