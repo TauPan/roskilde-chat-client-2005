@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.35 2003/05/03 22:40:32 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.36 2003/05/03 22:49:35 friedel Exp friedel $
 ;;; There's no documentation. But the changelog at the bottom of the
 ;;; file should give useful hints.
 
@@ -895,56 +895,61 @@ exec guile --debug -e main -s $0 $@
                 (set! COLS
                       (if columns
                           (string->number columns)
-                        (getmaxx stdscr)))
+                        (with-mutex mutex-curses
+                                    (getmaxx stdscr))))
                 (set! LINES (if lines
                                 (string->number lines)
-                              (getmaxy stdscr))))))
+                              (with-mutex mutex-curses
+                                          (getmaxy stdscr)))))))
            (makestdscr
             (lambda ()
               (set! stdscr (initscr))))
            (setup-windows
             (lambda ()
-              (makestdscr)
-              ;; some ncurses setup
-              ;; (cbreak)
-              (raw)                     ; We parse the control characters!
-              (noecho)
-              (nonl)
+              (with-mutex mutex-curses
+                          (makestdscr)
+                          ;; some ncurses setup
+                          ;; (cbreak)
+                          (raw) ; We parse the control characters!
+                          (noecho)
+                          (nonl))
               (set-window-size)
-              (set! scrollwin (newwin (- LINES typesize)
-                                      COLS
-                                      0
-                                      0))
-              (set! typewin (newwin typesize
-                                    COLS
-                                    (- LINES typesize)
-                                    0))
+              (with-mutex mutex-curses
+                          (set! scrollwin (newwin (- LINES typesize)
+                                                  COLS
+                                                  0
+                                                  0))
+                          (set! typewin (newwin typesize
+                                                COLS
+                                                (- LINES typesize)
+                                                0)))
               (if (not (and stdscr
                             scrollwin
                             typewin))
                   (begin
-                   (endwin)
+                   (with-mutex mutex-curses
+                               (endwin))
                    (error (format #f
                                   "Could not setup windows~% stdscr:~
                                   ~a, typewin: ~a, scrollwin:~a~%"
                                   stdscr typewin scrollwin))))
-              (scrollok stdscr #f)
-              (scrollok scrollwin #t)
-              (scrollok typewin #f)
-              (leaveok stdscr #t)
-              (leaveok scrollwin #t)
-              (leaveok typewin #f)
-              (keypad typewin #t)
-              (nodelay typewin #t)
-              (redraw)))
+              (with-mutex mutex-curses
+                          (scrollok stdscr #f)
+                          (scrollok scrollwin #t)
+                          (scrollok typewin #f)
+                          (leaveok stdscr #t)
+                          (leaveok scrollwin #t)
+                          (leaveok typewin #f)
+                          (keypad typewin #t)
+                          (nodelay typewin #t)
+                          (redraw))))
            (aborthandler
             (lambda (x)
               (ignore-all-signals)
               (set! FINISHED #t)))
            (conthandler
             (lambda (x)
-              (with-mutex mutex-curses
-                          (setup))))
+              (setup)))
            (ignore-all-signals
             (lambda ()
               (sigaction SIGWINCH SIG_IGN)
@@ -991,8 +996,8 @@ exec guile --debug -e main -s $0 $@
                     (append-log-maybe (reverse newlines))
                     (let ((drawlines (if REDRAWLINES
                                          (begin
+                                          (ignore-all-signals)
                                           (with-mutex mutex-curses
-                                                      (ignore-all-signals)
                                                       (werase scrollwin)
                                                       (wmove scrollwin 0 0))
                                           (set-handlers)
@@ -1081,6 +1086,9 @@ exec guile --debug -e main -s $0 $@
             (primitive-exit))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.36  2003/05/03 22:49:35  friedel
+;;; Put absolutely *all* threaded ncurses calls into mutex locks
+;;;
 ;;; Revision 1.35  2003/05/03 22:40:32  friedel
 ;;; Ignored any WINCH signals. That's the only clean way for now.
 ;;;
