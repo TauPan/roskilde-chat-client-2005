@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.22 2003/04/21 18:47:33 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.23 2003/04/21 19:23:39 friedel Exp friedel $
 ;;; There's no documentation. But the changelog at the bottom of the
 ;;; file should give useful hints.
 
@@ -67,6 +67,7 @@ exec guile --debug -e main -s $0 $@
 (define REDRAWLINES #f); if #t, text area is fully redrawn
 (define PASSWORD "")   ; we have to memorize the password because we
                                         ; need to re-authenticate
+(define cutbuffer "")  ; cutbuffer for the editor
 
 ;;; End of variables
 
@@ -411,27 +412,65 @@ exec guile --debug -e main -s $0 $@
        (display "Nick: ")
        (read-line)))))
 
+(define ->
+  (lambda (x dec min)
+    (let ((newx (- x dec)))
+      (if (> newx min)
+          newx
+        min))))
+
+(define -1>0
+  (lambda (x)
+    (-> x 1 0)))
+
+(define +<
+  (lambda (x inc max)
+    (let ((newx (+ x inc)))
+      (if (< newx max)
+          newx
+        max))))
+
+(define +1<
+  (lambda (x max)
+    (+< x 1 max)))
+
+(define history-access
+  (let ((history '())                   ; history for the editor
+        (pos 0))                        ; position
+    (lambda (direction line)
+      (let* ((newhist (if (not (eq? direction 'reset))
+                          (if (zero? pos)
+                              (cons line (delete line history))
+                            (consnew line history))
+                        history))
+             (newlen (length newhist))
+             (added (not (= (length history)
+                            newlen))))
+        (set! history newhist)
+        (if (not (null? history))
+            (case direction
+              ((reset)
+               (set! pos 0))
+              ((add)
+               (set! pos 0)
+               line)
+              ((up)
+               (if (not added)
+                   (set! pos (+1< pos (-1>0 newlen)))
+                 (set! pos (+< pos 2 (-1>0 newlen))))
+               (list-ref history pos))
+              ((down)
+               (if (not added)
+                   (set! pos (-1>0 pos)))
+               (list-ref history pos))
+              (else (list-ref history pos)))
+          line)))))
+
 (define (enter-string window)
-  "Read a string from an ncurses window"
+  "Read a string from a line in an ncurses window"
   (letrec ((startpos (getyx window))
            (width (getmaxx window))
            (textlen (* 5 (getmaxx window)))
-           (cutbuffer "")
-           (-1>0
-            (lambda (x)
-              (let ((newx (1- x)))
-                (if (< newx 0)
-                    x
-                  newx))))
-           (+<
-            (lambda (x inc max)
-              (let ((newx (+ x inc)))
-                (if (< newx max)
-                    newx
-                  max))))
-           (+1<
-            (lambda (x max)
-              (+< x 1 max)))
            (rec-edit;; the infamous recursive editor function
             (lambda (strpos line)
               (usleep 10000)            ; 1/100 s
@@ -466,7 +505,7 @@ exec guile --debug -e main -s $0 $@
                 (let ((c (wgetch window)));; get a character
                   (if (or FINISHED
                           (equal? c #\cr));; line complete
-                      line
+                      (history-access 'add line)
                     (case c;; examine character
                       ((#\eot) ;; delete forwards
                        (rec-edit strpos
@@ -489,6 +528,13 @@ exec guile --debug -e main -s $0 $@
                       ((#\np) (begin (redraw);; ctrl-l
                                      (rec-edit strpos
                                                line)))
+                      ((key-up #\dle) (rec-edit strpos
+                                                (history-access 'up
+                                                                line)))
+                      ((key-down #\so)
+                       (rec-edit strpos
+                                 (history-access 'down
+                                                 line)))
                       ((key-left #\stx) (rec-edit (-1>0 strpos);; left
                                                   line))
                       ((key-right #\ack) (rec-edit (+1< strpos len)
@@ -556,6 +602,11 @@ exec guile --debug -e main -s $0 $@
     (if (> (length lst) max)
         (list-head lst max)
       lst)))
+
+(define (consnew elt lst)
+  (if (member elt lst)
+      lst
+    (cons elt lst)))
 
 ;;; A few commands that are needed or useful outside of parse-user-input
 
@@ -880,6 +931,9 @@ exec guile --debug -e main -s $0 $@
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.23  2003/04/21 19:23:39  friedel
+;;; Hopefully fixed the crash in format
+;;;
 ;;; Revision 1.22  2003/04/21 18:47:33  friedel
 ;;; Make /login take optional password arguments :)
 ;;;
