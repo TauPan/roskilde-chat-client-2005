@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.36 2003/05/03 22:49:35 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.37 2003/05/03 22:53:18 friedel Exp friedel $
 ;;; There's no documentation. But the changelog at the bottom of the
 ;;; file should give useful hints.
 
@@ -542,7 +542,6 @@ exec guile --debug -e main -s $0 $@
                                                                   strpos
                                                                   len))))
                       ((#\etx) (make-command-string "quit")) ; ctrl-c
-                      ((#\sub) (make-command-string "stop")) ; ctrl-z
                       ((#\soh) (rec-edit 0 ; ctrl-a
                                          line))
                       ((#\enq) (rec-edit len ; ctrl-e
@@ -766,7 +765,7 @@ exec guile --debug -e main -s $0 $@
             (lambda ()
               (send-msg info-nick
                         (string-append
-                         "Known commands: help, quit, stop, msg "
+                         "Known commands: help, quit, msg "
                          "<nick> <text>, login [password], "
                          "qlogin [password], logoff, "
                          "fakemsg <from> <to> <text>, "
@@ -775,8 +774,6 @@ exec guile --debug -e main -s $0 $@
                         nick)))
            (quitchat
             (lambda () (set! FINISHED #t)))
-           (stopchat
-            (lambda () (raise SIGSTOP)))
            (sendpub
             (lambda ()
               (send-public nick line)))
@@ -833,9 +830,6 @@ exec guile --debug -e main -s $0 $@
             sendrest) ; Line started with <command-c>#\space
            ((string=? command "quit")
             quitchat)
-           ((or (string=? command "suspend")
-                (string=? command "stop"))
-            stopchat)
            ((string=? command "msg")
             sendmsg)
            ((string=? command "logoff")
@@ -947,19 +941,14 @@ exec guile --debug -e main -s $0 $@
             (lambda (x)
               (ignore-all-signals)
               (set! FINISHED #t)))
-           (conthandler
-            (lambda (x)
-              (setup)))
            (ignore-all-signals
             (lambda ()
               (sigaction SIGWINCH SIG_IGN)
-              (sigaction SIGCONT SIG_IGN)
               (sigaction SIGINT SIG_IGN)
               (sigaction SIGQUIT SIG_IGN)))
            (set-handlers
             (lambda ()
               (sigaction SIGWINCH SIG_IGN)
-              (sigaction SIGCONT conthandler)
               (sigaction SIGINT aborthandler)
               (sigaction SIGQUIT aborthandler)))
            (setup
@@ -1086,6 +1075,9 @@ exec guile --debug -e main -s $0 $@
             (primitive-exit))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.37  2003/05/03 22:53:18  friedel
+;;; Put all low-level calls to curses into mutex lock
+;;;
 ;;; Revision 1.36  2003/05/03 22:49:35  friedel
 ;;; Put absolutely *all* threaded ncurses calls into mutex locks
 ;;;
