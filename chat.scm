@@ -1,11 +1,13 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.27 2003/04/25 23:20:30 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.28 2003/04/26 11:25:37 friedel Exp friedel $
 ;;; There's no documentation. But the changelog at the bottom of the
 ;;; file should give useful hints.
 
 ;;; A little configuration:
+(define REFRESH-LINES-TIMEOUT 5) ; Lines will be refreshed every n
+                                        ; seconds
 
 ;;; Global constants (should not be modified)
 (define admin-nick "Administrator")
@@ -37,13 +39,7 @@ exec guile --debug -e main -s $0 $@
 
 (define message-re "^&message=")
 
-(define command-c #\/) ;; Use / as start of commands
-
-(define BUFSIZE 1024)
-
-(define REFRESH-LINES-TIMEOUT 3) ;; Lines will be refreshed every n
-                                        ; seconds
-
+(define command-c #\/) ; Use / as start of commands
 
 ;;; End of constants
 
@@ -66,14 +62,18 @@ exec guile --debug -e main -s $0 $@
                                 "/roskilde-chat.log"))
 (define SHOULD-LOGIN #t)
 
-(define sync-mutex (make-mutex)) ; Global mutex, 2 threads. Should be
-                                 ; enough
+(define mutex-sync (make-mutex)) ; Global mutex for non-threadsafe
+                                        ; operations
 (define FINISHED #f)   ; it #t, client will terminate
 (define REDRAWEDIT #f) ; if #t, editing area is fully redrawn
 (define REDRAWLINES #f); if #t, text area is fully redrawn
 (define PASSWORD "")   ; we have to memorize the password because we
                                         ; need to re-authenticate
 (define cutbuffer "")  ; cutbuffer for the editor
+
+(define cond-ready (make-condition-variable)) ; condition to update
+                                        ; the scroller window
+(define mutex-ready (make-mutex)) ; mutex for the above condition
 
 ;;; End of variables
 
@@ -92,11 +92,11 @@ exec guile --debug -e main -s $0 $@
 
 (define (url-encode text)
   "Cheap url encoding (makes hex out of everything :)"
-  (lock-mutex sync-mutex) ;; lock, because of format
-  (let ((hexlist (map (lambda (c)
-                        (format #f "%~x" (char->integer c)))
-                      (string->list text))))
-    (unlock-mutex sync-mutex)
+  ;; lock, because of format
+  (let ((hexlist (with-mutex mutex-sync
+                             (map (lambda (c)
+                                    (format #f "%~x" (char->integer c)))
+                                             (string->list text)))))
     (apply string-append hexlist)))
 
 (define (url-encode-old text)
@@ -295,7 +295,7 @@ exec guile --debug -e main -s $0 $@
     (while (not (eof-object? answer))
       (set! answer (read-line sock))
       (if (eof-object? answer)
-          #t;; while will always return #t anyways!
+          #t ; while will always return #t anyways!
         (set! response (cons answer response))))
     (close-port sock)
     (reverse response)))
@@ -365,7 +365,7 @@ exec guile --debug -e main -s $0 $@
   match removed)"
   (let loop ((answer #f)
              (matcher #f))
-       (cond ((eof-object? answer) #f);; Failure to match
+       (cond ((eof-object? answer) #f); Failure to match
              (matcher (let ((m-start (match:start matcher))
                             (m-end (match:end matcher)))
                         (string-append (substring answer
@@ -477,12 +477,12 @@ exec guile --debug -e main -s $0 $@
   (letrec ((startpos (getyx window))
            (width (getmaxx window))
            (textlen (* 5 (getmaxx window)))
-           (rec-edit;; the infamous recursive editor function
+           (rec-edit; the infamous recursive editor function
             (lambda (strpos line)
-              (usleep 10000)            ; 1/100 s
+              (usleep 5000)            ; 5/1000 s
               (let* ((len (string-length line))
                      (textwidth (- width (cdr startpos)))
-                     (partnums 7);; line is partitioned for scrolling
+                     (partnums 7); line is partitioned for scrolling
                      (leaveoff (- partnums 1))
                      (linepart (/ 1 partnums))
                      (partwidth (inexact->exact (* textwidth linepart)))
@@ -508,24 +508,23 @@ exec guile --debug -e main -s $0 $@
                                                     #\space
                                                     (+1< strpos len))
                                       len))))
-                (lock-mutex sync-mutex)
-                ;; Draw the line
-                (wmove window (car startpos) (cdr startpos))
-                (waddstr window (substring line
-                                           linepos
-                                           (+< (1- width)
-                                               linepos
-                                               len)))
-                (wclrtoeol window)
-                (wmove window 0 x)
-                (wrefresh window)
-                (unlock-mutex sync-mutex)
-                (let ((c (wgetch window)));; get a character
+                (with-mutex mutex-sync
+                            ;; Draw the line
+                            (wmove window (car startpos) (cdr startpos))
+                            (waddstr window (substring line
+                                                       linepos
+                                                       (+< (1- width)
+                                                           linepos
+                                                           len)))
+                            (wclrtoeol window)
+                            (wmove window 0 x)
+                            (wrefresh window))
+                (let ((c (wgetch window))); get a character
                   (if (or FINISHED
-                          (equal? c #\cr));; line complete
+                          (equal? c #\cr)); line complete
                       (history-access 'add line)
-                    (case c;; examine character
-                      ((#\eot key-dc);; delete forwards
+                    (case c; examine character
+                      ((#\eot key-dc); delete forwards
                        (rec-edit strpos
                                  (string-append
                                   (substring line
@@ -534,7 +533,7 @@ exec guile --debug -e main -s $0 $@
                                   (substring line
                                              (+1< strpos len)
                                              len))))
-                      ((key-backspace #\del #\bs);; delete backwards
+                      ((key-backspace #\del #\bs); delete backwards
                        (rec-edit (-1>0 strpos)
                                  (string-append
                                   (substring line
@@ -543,7 +542,7 @@ exec guile --debug -e main -s $0 $@
                                   (substring line
                                              strpos
                                              len))))
-                      ((#\np) (begin (redraw);; ctrl-l
+                      ((#\np) (begin (redraw); ctrl-l
                                      (rec-edit strpos
                                                line)))
                       ((key-up #\dle) (let ((newline (history-access
@@ -558,13 +557,13 @@ exec guile --debug -e main -s $0 $@
                                          (rec-edit (string-length
                                                     newline)
                                                    newline)))
-                      ((key-left #\stx) (rec-edit (-1>0 strpos);; left
+                      ((key-left #\stx) (rec-edit (-1>0 strpos); left
                                                   line))
                       ((key-right #\ack) (rec-edit (+1< strpos len)
-                                                   line));;right
+                                                   line));right
                       ((#\nak) (begin (set! cutbuffer line)
-                                      (rec-edit 0 "")));; ctrl-u
-                      ((#\vt) (begin (set! cutbuffer;; ctrl-k
+                                      (rec-edit 0 ""))); ctrl-u
+                      ((#\vt) (begin (set! cutbuffer; ctrl-k
                                            (substring line
                                                       strpos
                                                       len))
@@ -572,7 +571,7 @@ exec guile --debug -e main -s $0 $@
                                                (substring line
                                                           0
                                                           strpos))))
-                      ((#\em) (rec-edit (+ strpos;; ctrl-y
+                      ((#\em) (rec-edit (+ strpos; ctrl-y
                                            (string-length cutbuffer))
                                         (string-append (substring line
                                                                   0
@@ -581,22 +580,22 @@ exec guile --debug -e main -s $0 $@
                                                        (substring line
                                                                   strpos
                                                                   len))))
-                      ((#\etx) (make-command-string "quit"));; ctrl-c
-                      ((#\sub) (make-command-string "stop"));; ctrl-z
-                      ((#\soh) (rec-edit 0;; ctrl-a
+                      ((#\etx) (make-command-string "quit")); ctrl-c
+                      ((#\sub) (make-command-string "stop")); ctrl-z
+                      ((#\soh) (rec-edit 0; ctrl-a
                                          line))
-                      ((#\enq) (rec-edit len;; ctrl-e
+                      ((#\enq) (rec-edit len; ctrl-e
                                          line))
-                      ((#\esc);; esc prefix keymap:
+                      ((#\esc); esc prefix keymap:
                                         ; (or Meta)
                        (case (wgetch window)
-                         ((#\f key-right);; next word
+                         ((#\f key-right); next word
                           (rec-edit (afterword)
                                     line))
-                         ((#\b key-left);; previous word
+                         ((#\b key-left); previous word
                           (rec-edit (prevwordstart)
                                     line))
-                         ((#\d key-dc);; delete next word
+                         ((#\d key-dc); delete next word
                           (begin
                            (set! cutbuffer
                                  (substring line
@@ -610,7 +609,7 @@ exec guile --debug -e main -s $0 $@
                                            (substring line
                                                       (afterword)
                                                       len)))))
-                         ((key-backspace #\del #\bs);;del prevword
+                         ((key-backspace #\del #\bs);del prevword
                           (begin
                            (set! cutbuffer
                                  (substring line
@@ -625,7 +624,7 @@ exec guile --debug -e main -s $0 $@
                                                                strpos
                                                                len)))))
                          (else (rec-edit strpos line))))
-                      (else (if (char? c);; entered char
+                      (else (if (char? c); entered char
                                 (rec-edit (+1< strpos textlen)
                                           (string-append
                                            (substring line
@@ -692,9 +691,8 @@ exec guile --debug -e main -s $0 $@
 ;;; of the line
 (define (parse-user-input line sock nick)
   "Return a thunk, based on the users command"
-  ;;very basic commands (operating on the whole line or no args):
   (if (string-null? line)
-      true;; do nothing
+      true; do nothing
     (let* ((command-end (string-index line #\space))
            (command-args (string-split line #\space))
            (command (substring (car command-args)
@@ -726,7 +724,7 @@ exec guile --debug -e main -s $0 $@
            (quitchat
             (lambda () (set! FINISHED #t)))
            (stopchat
-            (lambda () (kill (getpid) SIGSTOP)))
+            (lambda () (raise SIGSTOP)))
            (sendpub
             (lambda ()
               (send-public nick line)))
@@ -741,10 +739,10 @@ exec guile --debug -e main -s $0 $@
                         (car args))))
            (logmein
             (lambda ()
-              (set! SHOULD-LOGIN #t)
-              (login nick (if (not (null? args))
-                              (rest-from 0)
-                            PASSWORD))))
+              (if (login nick (if (not (null? args))
+                                  (rest-from 0)
+                                PASSWORD))
+                  (set! SHOULD-LOGIN #t))))
            (logmeoff
             (lambda ()
               (set! SHOULD-LOGIN #f)
@@ -827,36 +825,32 @@ exec guile --debug -e main -s $0 $@
            (LINES 24)
            (scrollwin #f)
            (typewin #f)
+           (alarmhandler
+            (lambda (x)
+              #t))
            (winchhandler
             (lambda (x)
               (ignore-all-signals)
-              (lock-mutex sync-mutex)
-              (let ((columns (getenv "COLUMNS"))
-                    (lines (getenv "LINES")))
-                (set! COLS
-                      (if columns
-                          (string->number columns)
-                        (getmaxx stdscr)))
-                (set! LINES (if lines
-                                (string->number lines)
-                              (getmaxy stdscr))))
-              (set! scrollwin (newwin (- LINES typesize)
-                                      COLS
-                                      0
-                                      0))
-              (set! typewin (newwin typesize
-                                    COLS
-                                    (- LINES typesize)
-                                    0))
-              (redraw)
-              (unlock-mutex sync-mutex)
+              (with-mutex mutex-sync
+                          (let ((columns (getenv "COLUMNS"))
+                                (lines (getenv "LINES")))
+                            (set! COLS
+                                  (if columns
+                                      (string->number columns)
+                                    (getmaxx stdscr)))
+                            (set! LINES (if lines
+                                            (string->number lines)
+                                          (getmaxy stdscr))))
+                          (set! scrollwin (newwin (- LINES typesize)
+                                                  COLS
+                                                  0
+                                                  0))
+                          (set! typewin (newwin typesize
+                                                COLS
+                                                (- LINES typesize)
+                                                0))
+                          (redraw))
               (set-handlers)))
-           (ignore-all-signals
-            (lambda ()
-              (sigaction SIGCONT SIG_IGN)
-              (sigaction SIGINT SIG_IGN)
-              (sigaction SIGQUIT SIG_IGN)
-              (sigaction SIGWINCH SIG_IGN)))
            (aborthandler
             (lambda (x)
               (ignore-all-signals)
@@ -864,23 +858,31 @@ exec guile --debug -e main -s $0 $@
            (conthandler
             (lambda (x)
               (setup)))
+           (ignore-all-signals
+            (lambda ()
+              (sigaction SIGCONT SIG_IGN)
+              (sigaction SIGINT SIG_IGN)
+              (sigaction SIGQUIT SIG_IGN)
+              (sigaction SIGALRM SIG_IGN)
+              (sigaction SIGWINCH SIG_IGN)))
            (set-handlers
             (lambda ()
               (sigaction SIGCONT conthandler)
               (sigaction SIGINT aborthandler)
               (sigaction SIGQUIT aborthandler)
-              (sigaction SIGWINCH winchhandler)))
+              (sigaction SIGWINCH winchhandler)
+              (sigaction SIGALRM alarmhandler)))
            (setup
             (lambda ()
               (set! stdscr (initscr))
               (ignore-all-signals)
       ;;; some ncurses setup
               ;; (cbreak)
-              (raw);; We parse the control characters!
+              (raw)                     ; We parse the control characters!
               (noecho)
               (nonl)
-              (winchhandler #f);; Call the handler once to get
-              ;; the screen size and setup the windows.
+              (winchhandler #f)         ; Call the handler once to get
+                                        ; the screen size and setup the windows.
               (scrollok stdscr #f)
               (scrollok scrollwin #t)
               (scrollok typewin #f)
@@ -910,6 +912,7 @@ exec guile --debug -e main -s $0 $@
                    (send-admin-msg
                     (string-append nick
                                    " has just logged in"))))))
+           ;; Screen update as a new thread:
            (makescroller
             (lambda ()
               (begin-thread
@@ -927,18 +930,19 @@ exec guile --debug -e main -s $0 $@
                                                      newlines
                                                      lines))
                                        newlines)))
-                      (lock-mutex sync-mutex)
-                      (for-each (lambda (line)
-                                  (waddstr scrollwin
-                                           (char->string #\newline))
-                                  (waddstr scrollwin line))
-                                (reverse drawlines))
-                      (wrefresh scrollwin)
-                      (unlock-mutex sync-mutex)
+                      (with-mutex mutex-sync
+                                  (for-each
+                                   (lambda (line)
+                                     (waddstr scrollwin
+                                              (char->string #\newline))
+                                     (waddstr scrollwin line))
+                                   (reverse drawlines))
+                                  (wrefresh scrollwin))
                       (if (and SHOULD-LOGIN
                                (not (logged-in? nick)))
                           (login nick PASSWORD))
-                      (sleep REFRESH-LINES-TIMEOUT)
+                      (wait-condition-variable cond-ready
+                                               mutex-ready)
                       (if (not FINISHED)
                           (let ((oldlines (appendmax (* 2 LINES)
                                                      newlines
@@ -948,13 +952,13 @@ exec guile --debug -e main -s $0 $@
                                              nick
                                              oldlines)))
                         (begin
-                         (lock-mutex sync-mutex)
-                         (waddstr scrollwin
-                                  (char->string #\newline))
-                         (waddstr scrollwin
-                                  "Exiting chat. Please wait a moment...")
-                         (wrefresh scrollwin)
-                         (unlock-mutex sync-mutex)))))))))
+                         (with-mutex
+                          mutex-sync
+                          (waddstr scrollwin
+                                   (char->string #\newline))
+                          (waddstr scrollwin
+                                   "Exiting chat. Please wait a moment...")
+                          (wrefresh scrollwin))))))))))
           (simple-format #t "Currently logged in: ~a users.~%" (numusers))
           (trylogin)
           (append-log-maybe (list
@@ -962,30 +966,39 @@ exec guile --debug -e main -s $0 $@
                                             "Log started at ~a~%"
                                             (current-date-and-time))))
           (setup)
-          (let ((scroller (makescroller)))
-            ;; Screen update as a new thread:
+          (let ((scroller (makescroller))
+                (sleeper (begin-thread
+                          (let loop () (signal-condition-variable cond-ready)
+                               (yield)
+                               (sleep REFRESH-LINES-TIMEOUT)
+                               (if (not FINISHED)
+                                   (loop))))))
             (let loop ()
-                 (lock-mutex sync-mutex)
-                 (wclear typewin)
-                 (wmove typewin 0 0)
-                 (wstandout typewin)
-                 (waddstr typewin nick)
-                 (wstandend typewin)
-                 (waddstr typewin " >> ")
-                 (wrefresh typewin)
-                 (unlock-mutex sync-mutex)
+                 (with-mutex mutex-sync
+                             (wclear typewin)
+                             (wmove typewin 0 0)
+                             (wstandout typewin)
+                             (waddstr typewin nick)
+                             (wstandend typewin)
+                             (waddstr typewin " >> ")
+                             (wrefresh typewin))
                  (set! line (enter-string typewin))
                  ((parse-user-input line sock nick)) ; returns a thunk
                                         ; that is executed immediately
+                 ;;  Wake up the sleeping scroller (we may have just
+                 ;;  created a new line)
+                 (signal-condition-variable cond-ready)
+                 (yield)
                  (if FINISHED
                      (begin
-                      (lock-mutex sync-mutex)
-                      (wclear typewin)
-                      (waddstr typewin
-                               "Exiting chat. Please wait a moment...")
-                      (wrefresh typewin)
-                      (unlock-mutex sync-mutex)
+                      (with-mutex mutex-sync
+                                  (wclear typewin)
+                                  (waddstr
+                                   typewin
+                                   "Exiting chat. Please wait a moment...")
+                                  (wrefresh typewin))
                       (join-thread scroller)
+                      (join-thread sleeper)
                       (restore-signals)
                       (if SHOULD-LOGIN
                           (logoff nick))
@@ -999,6 +1012,10 @@ exec guile --debug -e main -s $0 $@
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.28  2003/04/26 11:25:37  friedel
+;;; made lines refresh time a constant, moved auto-relogin from input to
+;;; scroller (Doh!)
+;;;
 ;;; Revision 1.27  2003/04/25 23:20:30  friedel
 ;;; beautified info display
 ;;;
