@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.19 2003/04/21 12:07:42 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.20 2003/04/21 13:04:19 friedel Exp friedel $
 
 ;;; A little configuration:
 
@@ -412,6 +412,7 @@ exec guile --debug -e main -s $0 $@
   (letrec ((startpos (getyx window))
            (width (getmaxx window))
            (textlen (* 5 (getmaxx window)))
+           (cutbuffer "")
            (-1>0
             (lambda (x)
               (let ((newx (1- x)))
@@ -432,7 +433,7 @@ exec guile --debug -e main -s $0 $@
               (usleep 10000)            ; 1/100 s
               (let* ((len (string-length line))
                      (textwidth (- width (cdr startpos)))
-                     (partnums 4) ;; line is partitioned for scrolling
+                     (partnums 4);; line is partitioned for scrolling
                      (leaveoff (- partnums 1))
                      (linepart (/ 1 partnums))
                      (partwidth (inexact->exact (* textwidth linepart)))
@@ -463,6 +464,15 @@ exec guile --debug -e main -s $0 $@
                           (equal? c #\cr));; line complete
                       line
                     (case c;; examine character
+                      ((#\eot) ;; delete forwards
+                       (rec-edit strpos
+                                 (string-append
+                                  (substring line
+                                             0
+                                             strpos)
+                                  (substring line
+                                             (+1< strpos len)
+                                             len))))
                       ((key-backspace #\del #\bs);; delete backwards
                        (rec-edit (-1>0 strpos)
                                  (string-append
@@ -470,13 +480,40 @@ exec guile --debug -e main -s $0 $@
                                              0
                                              (-1>0 strpos))
                                   (substring line
-                                             (+1< strpos len)
+                                             strpos
                                              len))))
                       ((#\np) (begin (redraw);; ctrl-l
                                      (rec-edit strpos
                                                line)))
+                      ((key-left #\stx) (rec-edit (-1>0 strpos);; left
+                                                  line))
+                      ((key-right #\ack) (rec-edit (+1< strpos len)
+                                                   line));;right
+                      ((#\nak) (begin (set! cutbuffer line)
+                                      (rec-edit 0 "")));; ctrl-u
+                      ((#\vt) (begin (set! cutbuffer;; ctrl-k
+                                           (substring line
+                                                      strpos
+                                                      len))
+                                     (rec-edit strpos
+                                               (substring line
+                                                          0
+                                                          strpos))))
+                      ((#\em) (rec-edit (+ strpos;; ctrl-y
+                                           (string-length cutbuffer))
+                                        (string-append (substring line
+                                                                  0
+                                                                  strpos)
+                                                       cutbuffer
+                                                       (substring line
+                                                                  strpos
+                                                                  len))))
                       ((#\etx) (make-command-string "quit"));; ctrl-c
                       ((#\sub) (make-command-string "stop"));; ctrl-z
+                      ((#\soh) (rec-edit 0;; ctrl-a
+                                         line))
+                      ((#\enq) (rec-edit len;; ctrl-e
+                                         line))
                       (else (if (char? c);; entered char
                                 (rec-edit (+1< strpos textlen)
                                           (string-append
@@ -485,7 +522,7 @@ exec guile --debug -e main -s $0 $@
                                                       strpos)
                                            (char->string c)
                                            (substring line
-                                                      (+1< strpos len)
+                                                      strpos
                                                       len)))
                               (rec-edit strpos
                                         line))))))))))
@@ -575,6 +612,9 @@ exec guile --debug -e main -s $0 $@
            (sendpub
             (lambda ()
               (send-public nick line)))
+           (sendrest
+            (lambda ()
+              (send-public nick (rest-from 0))))
            (sendmsg
             (lambda ()
               (send-msg nick
@@ -603,14 +643,14 @@ exec guile --debug -e main -s $0 $@
             (lambda ()
               (send-msg nick
                         (simple-format #f "*** Logged in Users: ~a"
-                                (users))
+                                       (users))
                         nick
                         nick))))
       (if (char=? (string-ref line 0)
                   command-c)
           (cond
            ((string=? command "")
-            sendpub)   ; Line started with <command-c>#\space
+            sendrest) ; Line started with <command-c>#\space
            ((string=? command "quit")
             quitchat)
            ((or (string=? command "suspend")
@@ -832,6 +872,9 @@ exec guile --debug -e main -s $0 $@
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.20  2003/04/21 13:04:19  friedel
+;;; Make editor scroll on one line
+;;;
 ;;; Revision 1.19  2003/04/21 12:07:42  friedel
 ;;; User is automatically logged in when the timeout kicks in
 ;;;
