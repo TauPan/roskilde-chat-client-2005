@@ -1,6 +1,7 @@
 #!/usr/local/bin/guile \
 --debug -e main -s
 !#
+;;; $Id: $
 
 (define default-nick "Friedel")
 
@@ -265,3 +266,7 @@
          (if (not (string-null? line))
               (send-public sock nick line))
          (loop))))
+
+;;; $Log: $
+
+;;; EOF
