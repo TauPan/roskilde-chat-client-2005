@@ -1,11 +1,11 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.13 2003/04/14 22:38:00 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.14 2003/04/15 12:13:09 friedel Exp friedel $
 
 ;;; A little configuration:
 (define default-nick "Friedel")
-(define DEBUGGING #t)
+(define DEBUGGING #f)
 
 ;;; Global constants (should not be modified)
 (define admin-nick "Administrator")
@@ -46,11 +46,15 @@ exec guile --debug -e main -s $0 $@
              (ice-9 threads)
              (ice-9 format))
 
-;; GLOBAL VARIABLES! EVIL! :)
-(define sync-mutex (make-mutex)) ;; Global mutex, 2 threads. Should be
-                                 ;; enough
-(define FINISHED #f)   ;; it #t, client will terminate
-(define REDRAWEDIT #f) ;; if #t, editing area is redrawn fully
+;;; GLOBAL VARIABLES! EVIL! :)
+(define sync-mutex (make-mutex)) ; Global mutex, 2 threads. Should be
+                                 ; enough
+(define FINISHED #f)   ; it #t, client will terminate
+(define REDRAWEDIT #f) ; if #t, editing area is fully redrawn
+(define REDRAWLINES #f); if #t, text area is fully redrawn
+(define PASSWORD "")   ; we have to memorize the password because we
+                                        ; need to re-authenticate
+
 ;;; End of variables
 
 (dynamic-link "libncurses.so")
@@ -206,9 +210,9 @@ exec guile --debug -e main -s $0 $@
                   (error "Could not connect!"))))
              (handler
               (lambda (key . args)
-                (format #t "Warning: ~s failed.~%" (car args))
-                (format #t (cadr args) (cddr args))
-                (newline)))
+                (format (current-error-port)  "Warning: ~s failed.~%" (car args))
+                (format (current-error-port) (cadr args) (cddr args))
+                (newline (current-error-port))))
              (connector
               (lambda () (catch 'system-error
                            connectme
@@ -220,26 +224,32 @@ exec guile --debug -e main -s $0 $@
 
 (define (send-to-chatserver request)
   "Send request to chatserver, ignore the response"
+  (lock-mutex sync-mutex)
   (let ((sock (connect-chat)))
     (display request sock)
-    (flush-response sock)))
+    (flush-response sock)
+    (unlock-mutex sync-mutex)))
 
 (define (get-from-chatserver request regex)
   "Send get-request to chatserver, return the list of response lines,
   filtered by drop-before-match"
-  (let ((sock (connect-chat)))
+  (lock-mutex sync-mutex)
+  (let ((sock (connect-chat))
+        (response #f))
     (display request sock)
-    (get-response sock regex)))
+    (set! response (get-response sock regex))
+    (unlock-mutex sync-mutex)
+    response))
 
-(define (send-msg sock nick msgstring from to)
+(define (send-msg nick msgstring from to)
   "Send the message with text <msgstring> as name <nick> from <from>
   to <to>"
   (let ((get-url (make-msg-url nick msgstring from to)))
     (send-to-chatserver (http-get-request server-url get-url))))
 
-(define (send-public sock nick msgstring)
+(define (send-public nick msgstring)
   "Send a public message as <nick>"
-  (send-msg sock nick msgstring nick default-to-arg))
+  (send-msg nick msgstring nick default-to-arg))
 
 (define (get-response-lines sock)
   "Return the text response from the webserver as a list of strings
@@ -263,13 +273,12 @@ exec guile --debug -e main -s $0 $@
 
 (define flush-response close-port)
 
-(define (send-admin-msg sock message)
+(define (send-admin-msg message)
   "Send a message as Administrator"
-      (send-msg sock
-              admin-nick
-              message
-              admin-nick
-              default-to-arg))
+  (send-msg admin-nick
+            message
+            admin-nick
+            default-to-arg))
 
 (define (login nick pw)
   "Send login message to server, return #t if 'ok', #f otherwise"
@@ -330,24 +339,27 @@ exec guile --debug -e main -s $0 $@
         #f
       ans)))
 
-
 (define (get-new-lines sock nick lines)
   "Get new lines in chat"
+  (lock-mutex sync-mutex)
   (let ((get-url (make-retrieve-url nick))
-        (sock (connect-chat)))
+        (sock (connect-chat))
+        (response #f))
     (display (http-get-request server-url get-url)
              sock)
     (if (null? lines)
-        (get-response sock message-re)
+        (set! response (get-response sock message-re))
       (let loop ((line (get-first-line sock message-re))
                  (newlines '()))
            (if (or (not line)
                    (string=? line (car lines)))
                (begin
                 (flush-response sock)
-                (reverse newlines))
+                (set! response (reverse newlines)))
              (loop (get-next-line sock)
-               (cons line newlines)))))))
+               (cons line newlines)))))
+    (unlock-mutex sync-mutex)
+    response))
 
 (define (get-nick)
   "Get the nick to connect as"
@@ -416,6 +428,9 @@ exec guile --debug -e main -s $0 $@
                                   (substring line
                                              (+1< strpos len)
                                              len))))
+                      ((#\np) (begin (redraw) ;; ctrl-l
+                                     (rec-edit strpos
+                                               line)))
                       ((#\etx) (make-command-string "quit"));; ctrl-c
                       ((#\sub) (make-command-string "stop"));; ctrl-z
                       (else (if (char? c);; entered char
@@ -441,6 +456,8 @@ exec guile --debug -e main -s $0 $@
         (list-head lst max)
       lst)))
 
+;;; A few commands that are needed or useful outside of parse-user-input
+
 ;;; Counterparts to the unix commands true and false:
 (define (true)
   "true - do nothing, successfully"
@@ -449,6 +466,12 @@ exec guile --debug -e main -s $0 $@
 (define (false)
   "false - do nothing, unsuccessfully"
   #f)
+
+;;; Redraw all:
+(define redraw
+  (lambda ()
+    (set! REDRAWLINES #t)
+    (set! REDRAWEDIT #t)))
 
 ;;; Parser for entered line, checks for command-character at the start
 ;;; of the line
@@ -476,31 +499,81 @@ exec guile --debug -e main -s $0 $@
                            0
                            (1- (string-length joined))))))
                   ;;; COMMANDS:
+           (help
+            (lambda ()
+              (send-msg nick
+                        (string-append
+                         "*** Known commands: help, quit, stop, msg "
+                         "<nick> <text>, login, logoff, fakemsg "
+                         "<from> <to> <text>, fakepub <from>, names")
+                        nick
+                        nick)))
+           (quitchat
+            (lambda () (set! FINISHED #t)))
+           (stopchat
+            (lambda () (kill (getpid) SIGSTOP)))
            (sendpub
             (lambda ()
-              (send-public sock nick line)))
+              (send-public nick line)))
            (sendmsg
             (lambda ()
-              (send-msg sock
-                        nick
+              (send-msg nick
                         (rest-from 1)
                         nick
-                        (car args)))))
+                        (car args))))
+           (logmein
+            (lambda ()
+              (login nick PASSWORD)))
+           (logmeoff
+            (lambda ()
+              (logoff nick)))
+           (fakemsg
+            (lambda ()
+              (send-msg (car args)
+                        (rest-from 2)
+                        (car args)
+                        (cadr args))))
+           (fakepub
+            (lambda ()
+              (send-msg (car args)
+                        (rest-from 1)
+                        (car args)
+                        default-to-arg)))
+           (names
+            (lambda ()
+              (send-msg nick
+                        (format #f "*** Logged in Users: ~a"
+                                (users))
+                        nick
+                        nick))))
       (if (char=? (string-ref line 0)
                   command-c)
           (cond
            ((string=? command "")
             sendpub)                    ; Line started with <command-c>#\space
            ((string=? command "quit")
-            (lambda () (set! FINISHED #t)))
+            quitchat)
            ((or (string=? command "suspend")
                 (string=? command "stop"))
-            (lambda () (kill (getpid) SIGSTOP)))
+            stopchat)
            ((string=? command "msg")
             sendmsg)
-           (else false)))
-      ;; no command, send the line
-      sendpub)))
+           ((string=? command "logoff")
+            logmeoff)
+           ((string=? command "login")
+            logmein)
+           ((string=? command "fakemsg")
+            fakemsg)
+           ((string=? command "fakepub")
+            fakepub)
+           ((string=? command "help")
+            help)
+           ((or (string=? command "names")
+                (string=? command "users"))
+            names)
+           (else false))
+        ;; no command, send the line
+        sendpub))))
 
 ;;; Main
 
@@ -512,17 +585,12 @@ exec guile --debug -e main -s $0 $@
   (letrec ((sock '())
            (nick (get-nick))
            (line "")
-           (stdscr (initscr))
+           (stdscr #f)
            (typesize 1)
            (COLS 80)
            (LINES 24)
            (scrollwin #f)
            (typewin #f)
-           (REDRAWLINES #f)
-           (redraw
-            (lambda ()
-              (set! REDRAWLINES #t)
-              (set! REDRAWEDIT #t)))
            (winchhandler
             (lambda (x)
               (lock-mutex sync-mutex)
@@ -563,6 +631,7 @@ exec guile --debug -e main -s $0 $@
               (sigaction SIGWINCH winchhandler)))
            (setup
             (lambda ()
+              (set! stdscr (initscr))
               (ignore-all-signals)
       ;;; some ncurses setup
               ;; (cbreak)
@@ -588,13 +657,13 @@ exec guile --debug -e main -s $0 $@
                    (while
                        (not (login
                              nick
-                             (getpass (format #f
-                                              "Password for ~a: "
-                                              nick))))
+                             (begin (set! PASSWORD (getpass (format #f
+                                                                    "Password for ~a: "
+                                                                    nick)))
+                                    PASSWORD)))
                      (display "Sorry, Try again!")
                      (newline))
                    (send-admin-msg
-                    sock
                     (string-append nick
                                    " has just logged in"))))))
            (makescroller
@@ -631,10 +700,9 @@ exec guile --debug -e main -s $0 $@
                               (get-new-lines sock
                                              nick
                                              oldlines))))))))))
-          (let ((scroller (begin
-                           (trylogin)
-                           (setup)
-                           (makescroller))))
+          (trylogin)
+          (setup)
+          (let ((scroller (makescroller)))
             ;; Screen update as a new thread:
             (let loop ()
                  (lock-mutex sync-mutex)
@@ -660,6 +728,9 @@ exec guile --debug -e main -s $0 $@
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.14  2003/04/15 12:13:09  friedel
+;;; Another bug in parse-user-input
+;;;
 ;;; Revision 1.13  2003/04/14 22:38:00  friedel
 ;;; Uhm, a bug in parse-user-input ((letrec) instead of (let*)) sneaked in
 ;;; during "cleanups" :-}
