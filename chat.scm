@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.23 2003/04/21 19:23:39 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.24 2003/04/22 14:46:34 friedel Exp friedel $
 ;;; There's no documentation. But the changelog at the bottom of the
 ;;; file should give useful hints.
 
@@ -441,7 +441,7 @@ exec guile --debug -e main -s $0 $@
       (let* ((newhist (if (not (eq? direction 'reset))
                           (if (zero? pos)
                               (cons line (delete line history))
-                            (consnew line history))
+                            (newinsert line history pos))
                         history))
              (newlen (length newhist))
              (added (not (= (length history)
@@ -480,7 +480,7 @@ exec guile --debug -e main -s $0 $@
                      (leaveoff (- partnums 1))
                      (linepart (/ 1 partnums))
                      (partwidth (inexact->exact (* textwidth linepart)))
-                     (parts (inexact->exact (/ len
+                     (parts (inexact->exact (/ strpos
                                                partwidth)))
                      (linepos (if (>= parts
                                       leaveoff)
@@ -507,7 +507,7 @@ exec guile --debug -e main -s $0 $@
                           (equal? c #\cr));; line complete
                       (history-access 'add line)
                     (case c;; examine character
-                      ((#\eot) ;; delete forwards
+                      ((#\eot);; delete forwards
                        (rec-edit strpos
                                  (string-append
                                   (substring line
@@ -528,13 +528,18 @@ exec guile --debug -e main -s $0 $@
                       ((#\np) (begin (redraw);; ctrl-l
                                      (rec-edit strpos
                                                line)))
-                      ((key-up #\dle) (rec-edit strpos
-                                                (history-access 'up
-                                                                line)))
-                      ((key-down #\so)
-                       (rec-edit strpos
-                                 (history-access 'down
-                                                 line)))
+                      ((key-up #\dle) (let ((newline (history-access
+                                                      'up
+                                                      line)))
+                                        (rec-edit (string-length
+                                                   newline)
+                                                  newline)))
+                      ((key-down #\so) (let ((newline (history-access
+                                                       'down
+                                                       line)))
+                                         (rec-edit (string-length
+                                                    newline)
+                                                   newline)))
                       ((key-left #\stx) (rec-edit (-1>0 strpos);; left
                                                   line))
                       ((key-right #\ack) (rec-edit (+1< strpos len)
@@ -603,10 +608,12 @@ exec guile --debug -e main -s $0 $@
         (list-head lst max)
       lst)))
 
-(define (consnew elt lst)
+(define (newinsert elt lst pos)
+  "Insert new (!) element into list at pos (used by history)"
   (if (member elt lst)
       lst
-    (cons elt lst)))
+    (append (list-head lst pos)
+            (cons elt (list-tail lst pos)))))
 
 ;;; A few commands that are needed or useful outside of parse-user-input
 
@@ -931,6 +938,9 @@ exec guile --debug -e main -s $0 $@
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.24  2003/04/22 14:46:34  friedel
+;;; Working history (more or less the behaviour i'd expect)
+;;;
 ;;; Revision 1.23  2003/04/21 19:23:39  friedel
 ;;; Hopefully fixed the crash in format
 ;;;
