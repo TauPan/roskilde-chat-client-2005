@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.18 2003/04/21 11:42:40 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.19 2003/04/21 12:07:42 friedel Exp friedel $
 
 ;;; A little configuration:
 
@@ -411,52 +411,58 @@ exec guile --debug -e main -s $0 $@
   "Read a string from an ncurses window"
   (letrec ((startpos (getyx window))
            (width (getmaxx window))
-           (length (getmaxy window))
+           (textlen (* 5 (getmaxx window)))
            (-1>0
             (lambda (x)
               (let ((newx (1- x)))
                 (if (< newx 0)
                     x
                   newx))))
-           (+1<
-            (lambda (x max)
-              (let ((newx (1+ x)))
+           (+<
+            (lambda (x inc max)
+              (let ((newx (+ x inc)))
                 (if (< newx max)
                     newx
-                  x))))
-           (rec-edit ;; the infamous recursive editor function
+                  max))))
+           (+1<
+            (lambda (x max)
+              (+< x 1 max)))
+           (rec-edit;; the infamous recursive editor function
             (lambda (strpos line)
               (usleep 10000)            ; 1/100 s
-              (let* ((liney (quotient (+ strpos (cdr startpos))
-                                      width))
-                     (y  (+ liney
-                            (car startpos)))
-                     (x (if (zero? liney)
-                            (+ strpos (cdr startpos))
-                          (- strpos (* liney width))))
-                     (len (string-length line)))
+              (let* ((len (string-length line))
+                     (textwidth (- width (cdr startpos)))
+                     (partnums 4) ;; line is partitioned for scrolling
+                     (leaveoff (- partnums 1))
+                     (linepart (/ 1 partnums))
+                     (partwidth (inexact->exact (* textwidth linepart)))
+                     (parts (inexact->exact (/ len
+                                               partwidth)))
+                     (linepos (if (>= parts
+                                      leaveoff)
+                                  (* (- parts leaveoff)
+                                     partwidth)
+                                0))
+                     (x (- (+ strpos
+                              (cdr startpos))
+                           linepos)))
                 (lock-mutex sync-mutex)
-                ;; Draw the (changed part of the) line
-                (if REDRAWEDIT ;; draw everything
-                    (begin
-                     (wmove window (car startpos) (cdr startpos))
-                     (waddstr window line)
-                     (set! REDRAWEDIT #f))
-                  (begin ;; draw the tail
-                   (wmove window y (-1>0 x))
-                   (waddstr window
-                            (substring line
-                                       (-1>0 strpos)
-                                       len))))
+                ;; Draw the line
+                (wmove window (car startpos) (cdr startpos))
+                (waddstr window (substring line
+                                           linepos
+                                           (+< (1- width)
+                                               linepos
+                                               len)))
                 (wclrtoeol window)
-                (wmove window y x)
+                (wmove window 0 x)
                 (wrefresh window)
                 (unlock-mutex sync-mutex)
-                (let ((c (wgetch window))) ;; get a character
+                (let ((c (wgetch window)));; get a character
                   (if (or FINISHED
-                          (equal? c #\cr)) ;; line complete
+                          (equal? c #\cr));; line complete
                       line
-                    (case c ;; examine character
+                    (case c;; examine character
                       ((key-backspace #\del #\bs);; delete backwards
                        (rec-edit (-1>0 strpos)
                                  (string-append
@@ -466,13 +472,13 @@ exec guile --debug -e main -s $0 $@
                                   (substring line
                                              (+1< strpos len)
                                              len))))
-                      ((#\np) (begin (redraw) ;; ctrl-l
+                      ((#\np) (begin (redraw);; ctrl-l
                                      (rec-edit strpos
                                                line)))
                       ((#\etx) (make-command-string "quit"));; ctrl-c
                       ((#\sub) (make-command-string "stop"));; ctrl-z
                       (else (if (char? c);; entered char
-                                (rec-edit (+1< strpos width)
+                                (rec-edit (+1< strpos textlen)
                                           (string-append
                                            (substring line
                                                       0
@@ -826,6 +832,9 @@ exec guile --debug -e main -s $0 $@
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.19  2003/04/21 12:07:42  friedel
+;;; User is automatically logged in when the timeout kicks in
+;;;
 ;;; Revision 1.18  2003/04/21 11:42:40  friedel
 ;;; Logfile support. New command-line switches: --nologfile (or -L)
 ;;;                                     and --logfile <logfile> (or
