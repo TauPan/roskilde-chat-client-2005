@@ -1,11 +1,11 @@
 #!/usr/local/bin/guile \
 --debug -e main -s
 !#
-;;; $Id: chat.scm,v 1.6 2003/04/11 13:03:47 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.7 2003/04/11 13:25:45 friedel Exp friedel $
 
 ;;; A little configuration:
 (define default-nick "Friedel")
-(define DEBUGGING #t)
+(define DEBUGGING #f)
 
 ;;; Global constants (should not be modified)
 (define admin-nick "Administrator")
@@ -35,6 +35,9 @@
 (define message-re "^&message=")
 
 (define command-c #\/) ;; Use / as start of commands
+
+(define BUFSIZE 1024)
+
 ;;; End of constants
 
 (use-modules (srfi srfi-1)
@@ -176,7 +179,9 @@
          (addr (car addrs))
          (sock (socket AF_INET SOCK_STREAM 0)))
     (if (connect sock AF_INET addr port)
-        sock
+        (begin
+         (setvbuf sock _IOLBF)
+         sock)
       (error "Could not connect!"))))
 
 
@@ -196,39 +201,22 @@
 
 (define (get-response-lines sock)
   "Return the text response from the webserver as a list of strings
-  (lines)"
+  (lines) [the order of the webserver response is preserved, the chat
+  lines will be ordered from newest to oldest]"
   (let ((answer #f)
         (response '()))
     (while (not (eof-object? answer))
       (set! answer (read-line sock))
       (if (eof-object? answer)
-          #t ;; while will always return #t anyways!
-          (set! response (cons answer response))))
+          #t;; while will always return #t anyways!
+        (set! response (cons answer response))))
     (close-port sock)
     (reverse response)))
 
-
 (define (get-response sock regex)
-  (reverse (drop-before-match (get-response-lines sock)
-                              regex
-                              #t)))
-
-(define (get-answer sock regex)
-  "get the response from the server, filter the lines with
-  (drop-before-match) and print the result"
-  (let ((response (get-response sock regex)))
-    (if (not (null? response))
-        (for-each (lambda (line)
-                    (display line)
-                    (newline))
-                  response))))
-
-(define (get-text sock nick)
-  (let ((get-url (make-retrieve-url nick))
-        (sock (connect-chat server-url server-port)))
-    (display (http-get-request server-url get-url)
-             sock)
-    (get-answer sock message-re)))
+  (drop-before-match (get-response-lines sock)
+                     regex
+                     #t))
 
 (define flush-response close-port)
 
@@ -257,13 +245,49 @@
                                  login-arg nick)
                   sock))
 
+(define (get-first-line sock message-re)
+  (let loop ((answer #f)
+             (matcher #f))
+       (cond ((eof-object? answer) #f);; Failure to match
+             (matcher (let ((m-start (match:start matcher))
+                            (m-end (match:end matcher)))
+                        (string-append (substring answer
+                                                  0
+                                                  m-start)
+                                       (substring answer
+                                                  m-end
+                                                  (string-length
+                                                   answer)))))
+             (else (let* ((newans (read-line sock))
+                          (newmatch (if (not (eof-object? newans))
+                                        (string-match message-re
+                                                      newans)
+                                      #f)))
+                     (loop newans newmatch))))))
+
+(define (get-next-line sock)
+  (let ((ans (read-line sock)))
+    (if (eof-object? ans)
+        #f
+      ans)))
+
+
 (define (get-new-lines sock nick lines)
-  ;; No check for now
   (let ((get-url (make-retrieve-url nick))
         (sock (connect-chat server-url server-port)))
     (display (http-get-request server-url get-url)
              sock)
-    (get-response sock message-re)))
+    (if (null? lines)
+        (get-response sock message-re)
+      (let loop ((line (get-first-line sock message-re))
+                 (newlines '()))
+           (if (or (not line)
+                   (string=? line (car lines)))
+               (begin
+                (flush-response sock)
+                (reverse newlines))
+             (loop (get-next-line sock)
+               (cons line newlines)))))))
 
 (define (get-nick)
   (if (not (null? (cdr (command-line))))
@@ -274,7 +298,6 @@
 
 (define (enter-string window)
   "Read a string from an ncurses window"
-  (usleep 100000) ; 1/10 s
   (let ((startpos (getyx window))
         (width (getmaxx window))
         (length (getmaxy window))
@@ -290,6 +313,7 @@
                    x)))))
     (let rec-edit ((strpos 0)
                    (line ""))
+         (usleep 100000) ; 1/10 s
 ;         (display (format #f "l: ~s~%" line)
 ;                  (current-error-port))
          (let* ((liney (quotient strpos width))
@@ -339,6 +363,15 @@
                                                  len)))
                          (rec-edit strpos
                                    line))))))))))
+
+;;; Some list functions
+(define (appendmax max . args)
+  "Append the arguments and then truncate the resulting list to <max>
+  elements"
+  (let ((lst (apply append args)))
+    (if (> (length lst) max)
+        (list-head lst max)
+      lst)))
 
 ;;; Parser for entered line, checks for command-character at the start
 ;;; of the line
@@ -396,7 +429,6 @@
       recompile and install!"))
   (let* ((sock '())
          (nick (get-nick))
-         (lines '())
          (line ""))
     (if (not DEBUGGING)
         (begin
@@ -469,22 +501,30 @@
               ;; 2 Threads now:
               (let* ((scroller
                       (begin-thread
-                       (let loop ()
-                            (set! lines (get-new-lines sock nick lines))
+                       (let loop ((lines '())
+                                  (newlines (get-new-lines sock
+                                                           nick
+                                                           '())))
+                            (display (format #f "New lines: ~s~%~%" newlines)
+                                     (current-error-port))
                             (lock-mutex sync-mutex)
-                            (werase scrollwin)
-                            (wmove scrollwin 0 0)
                             (for-each (lambda (line)
-                                        (waddstr scrollwin line)
                                         (waddstr scrollwin
                                                  (make-string 1
-                                                              #\newline)))
-                                      lines)
+                                                              #\newline))
+                                        (waddstr scrollwin line))
+                                      (reverse newlines))
                             (wrefresh scrollwin)
                             (unlock-mutex sync-mutex)
                             (sleep 1)
                             (if (not FINISHED)
-                                (loop))))))
+                                (let ((oldlines (appendmax (* 2 LINES)
+                                                           newlines
+                                                           lines)))
+                                  (loop oldlines
+                                    (get-new-lines sock
+                                                   nick
+                                                   oldlines))))))))
                 (let loop ()
                      (lock-mutex sync-mutex)
                      (wclear typewin)
@@ -492,7 +532,7 @@
                      (wstandout typewin)
                      (waddstr typewin nick)
                      (wstandend typewin)
-                     (waddstr typewin ">> ")
+                     (waddstr typewin " >> ")
                      (wrefresh typewin)
                      (unlock-mutex sync-mutex)
                      (set! line (enter-string typewin))
@@ -509,6 +549,9 @@
                        (loop))))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.7  2003/04/11 13:25:45  friedel
+;;; Hm, fixed some bugs. Now it's possible to have a normal chat.
+;;;
 ;;; Revision 1.6  2003/04/11 13:03:47  friedel
 ;;; First version with all the basic features. Next step: cleaning up.
 ;;;
