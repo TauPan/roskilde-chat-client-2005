@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.37 2003/05/03 22:53:18 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.38 2003/05/04 22:51:32 friedel Exp delgado $
 ;;; There's no documentation. But the changelog at the bottom of the
 ;;; file should give useful hints.
 
@@ -62,10 +62,14 @@ exec guile --debug -e main -s $0 $@
                              '((nologin (single-char #\n))
                                (nologfile (single-char #\L))
                                (logfile (single-char #\l)
-                                        (value #t)))))
+                                        (value #t))
+                               (proxy (single-char #\p)
+                                      (value 'optional)))))
 
 ;;; GLOBAL VARIABLES! EVIL! :)
 ;; parsed options:
+(define PROXY #f)
+(define PROXY-PORT #f)
 (define LOGFILE (string-append  "." ;(getenv "HOME")
                                 "/roskilde-chat.log"))
 (define SHOULD-LOGIN #t)
@@ -84,6 +88,8 @@ exec guile --debug -e main -s $0 $@
 (define cond-ready (make-condition-variable)) ; condition to update
                                         ; the scroller window
 (define mutex-ready (make-mutex)) ; mutex for the above condition
+
+(define connect-chat #f) ;; Global connector object
 
 ;;; End of variables
 
@@ -169,7 +175,8 @@ exec guile --debug -e main -s $0 $@
 ;;; FIXME: New parameter: timestamp for optional Only-If-Newer Header
 (define (http-get-request host url)
   "Build a http-request for url on host"
-  (string-append "GET "
+  (string-append "GET http://"
+                 host
                  url
                  " HTTP/1.0\r\n"
                  "Host: " host "\r\n"
@@ -209,7 +216,7 @@ exec guile --debug -e main -s $0 $@
 (define (get-connector server-name port)
   "Return a thunk that will return a connected socket to
   <port> on <server-name>"
-  (let* ((entry (gethostbyname server-url))
+  (let* ((entry (gethostbyname server-name))
          (addrs (array-ref entry 4))
          (addr (car addrs)))
     (letrec ((connectme
@@ -234,8 +241,6 @@ exec guile --debug -e main -s $0 $@
                            connectme
                            handler))))
             connector)))
-
-(define connect-chat (get-connector server-url server-port))
 
 (define (send-to-chatserver request)
   "Send request to chatserver, ignore the response"
@@ -391,7 +396,7 @@ exec guile --debug -e main -s $0 $@
 (define (get-nick)
   "Get the nick to connect as"
   (let ((cmdargs (option-ref OPTIONS '() #f)))
-    (if cmdargs
+    (if (not (null? cmdargs))
         (car cmdargs)
       (begin
        (display "Nick: ")
@@ -732,6 +737,22 @@ exec guile --debug -e main -s $0 $@
 ;;    (set! REDRAWEDIT #t))
     ))
 
+;;; Set proxy global variables from http://proxy-server:port/ string
+(define (set-proxy-from-arg! proxy-arg)
+  (let* ((rx (make-regexp "^http://([-A-Za-z][-A-Za-z0-9\.]*):([0-9]+)/?"
+                         regexp/icase
+                         regexp/extended))
+         (matches (regexp-exec rx proxy-arg)))
+    (if matches
+        (begin
+         (set! PROXY (match:substring matches 1))
+         (set! PROXY-PORT (string->number (match:substring matches 2))))
+      (error (format #f "Proxy specification \"~a\" can not be parsed. Good bye!"
+                     proxy-arg)))))
+
+(define (set-proxy-from-env!)
+  (set-proxy-from-arg! (getenv "http_proxy")))
+
 ;;; Parser for entered line, checks for command-character at the start
 ;;; of the line
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -851,6 +872,8 @@ exec guile --debug -e main -s $0 $@
         ;; no command, send the line
         sendpub))))
 
+
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;                  Main
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -860,6 +883,15 @@ exec guile --debug -e main -s $0 $@
       (error "Please reconfigure guile with --with-threads and
       recompile and install!"))
   ;;; Parse options (other than nick)
+  (let ((OPTIONS-PROXY (option-ref OPTIONS 'proxy #f)))
+    (case OPTIONS-PROXY
+      ((#f) (begin (set! PROXY #f) ; to be safe, re-set
+                   (set! PROXY-PORT #f))) ; defaults 
+      ((#t) (set-proxy-from-env!)) ;set PROXY+PROXY-PORT
+      (else (set-proxy-from-arg! OPTIONS-PROXY)))) ;;dito
+  (set! connect-chat (if PROXY
+                         (get-connector PROXY PROXY-PORT)
+                       (get-connector server-url server-port)))
   (set! SHOULD-LOGIN (not (option-ref OPTIONS 'nologin #f)))
   (set! LOGFILE (and (not (option-ref OPTIONS 'nologfile #f))
                      (option-ref OPTIONS
@@ -1075,6 +1107,9 @@ exec guile --debug -e main -s $0 $@
             (primitive-exit))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.38  2003/05/04 22:51:32  friedel
+;;; Removed ctrl-z, /stop, /abort and conthandler (SIGCONT)
+;;;
 ;;; Revision 1.37  2003/05/03 22:53:18  friedel
 ;;; Put all low-level calls to curses into mutex lock
 ;;;
