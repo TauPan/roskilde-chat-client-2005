@@ -1,13 +1,18 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.28 2003/04/26 11:25:37 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.29 2003/04/27 10:44:46 friedel Exp friedel $
 ;;; There's no documentation. But the changelog at the bottom of the
 ;;; file should give useful hints.
 
 ;;; A little configuration:
 (define REFRESH-LINES-TIMEOUT 5) ; Lines will be refreshed every n
                                         ; seconds
+(define GET-NEW-LINE-WAIT 100000) ; 1/10 s ; usecs to wait before the
+                                        ; sent line is expected to be
+                                        ; on the  server
+(define NEXT-CHARACTER-SLEEP 5000) ; 5/1000 s ; usecs to wait before next
+                                        ; character is accepted
 
 ;;; Global constants (should not be modified)
 (define admin-nick "Administrator")
@@ -479,7 +484,7 @@ exec guile --debug -e main -s $0 $@
            (textlen (* 5 (getmaxx window)))
            (rec-edit; the infamous recursive editor function
             (lambda (strpos line)
-              (usleep 5000)            ; 5/1000 s
+              (usleep NEXT-CHARACTER-SLEEP)
               (let* ((len (string-length line))
                      (textwidth (- width (cdr startpos)))
                      (partnums 7); line is partitioned for scrolling
@@ -968,7 +973,8 @@ exec guile --debug -e main -s $0 $@
           (setup)
           (let ((scroller (makescroller))
                 (sleeper (begin-thread
-                          (let loop () (signal-condition-variable cond-ready)
+                          (let loop ()
+                               (signal-condition-variable cond-ready)
                                (yield)
                                (sleep REFRESH-LINES-TIMEOUT)
                                (if (not FINISHED)
@@ -987,6 +993,7 @@ exec guile --debug -e main -s $0 $@
                                         ; that is executed immediately
                  ;;  Wake up the sleeping scroller (we may have just
                  ;;  created a new line)
+                 (usleep GET-NEW-LINE-WAIT)
                  (signal-condition-variable cond-ready)
                  (yield)
                  (if FINISHED
@@ -1012,6 +1019,12 @@ exec guile --debug -e main -s $0 $@
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.29  2003/04/27 10:44:46  friedel
+;;; Entering a line causes immediate screen update,
+;;; corrected comment conventions,
+;;; exchanged (lock-mutex) (unlock-mutex) pairs with (with-mutex) macro,
+;;; misc small changes.
+;;;
 ;;; Revision 1.28  2003/04/26 11:25:37  friedel
 ;;; made lines refresh time a constant, moved auto-relogin from input to
 ;;; scroller (Doh!)
