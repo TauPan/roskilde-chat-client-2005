@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.34 2003/05/03 10:06:30 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.35 2003/05/03 22:40:32 friedel Exp friedel $
 ;;; There's no documentation. But the changelog at the bottom of the
 ;;; file should give useful hints.
 
@@ -429,9 +429,12 @@ exec guile --debug -e main -s $0 $@
 
 (define (enter-string window . rest)
   "Read a string from a line in an ncurses window"
-  (letrec ((startpos (getyx window))
-           (width (getmaxx window))
-           (textlen (* 5 (getmaxx window)))
+  (letrec ((startpos (with-mutex mutex-curses
+                                 (getyx window)))
+           (width (with-mutex mutex-curses
+                              (getmaxx window)))
+           (textlen (* 5 (with-mutex mutex-curses
+                                     (getmaxx window))))
            (rec-edit                    ; the infamous recursive
                                         ; editor function
             (lambda (strpos line)
@@ -940,7 +943,8 @@ exec guile --debug -e main -s $0 $@
               (set! FINISHED #t)))
            (conthandler
             (lambda (x)
-              (setup)))
+              (with-mutex mutex-curses
+                          (setup))))
            (ignore-all-signals
             (lambda ()
               (sigaction SIGWINCH SIG_IGN)
@@ -1018,15 +1022,16 @@ exec guile --debug -e main -s $0 $@
                               (get-new-lines sock
                                              nick
                                              oldlines)))
-                        (begin
                          (with-mutex
                           mutex-curses
                           (waddstr scrollwin
                                    (char->string #\newline))
                           (waddstr scrollwin
                                    "Exiting chat. Please wait a moment...")
-                          (wrefresh scrollwin))))))))))
-          (simple-format #t "Currently logged in: ~a users.~%" (numusers))
+                          (wrefresh scrollwin)))))))))
+          (simple-format #t
+                         "Currently logged in: ~a users.~%"
+                         (numusers))
           (trylogin)
           (append-log-maybe (list
                              (simple-format #f
@@ -1076,6 +1081,9 @@ exec guile --debug -e main -s $0 $@
             (primitive-exit))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.35  2003/05/03 22:40:32  friedel
+;;; Ignored any WINCH signals. That's the only clean way for now.
+;;;
 ;;; Revision 1.34  2003/05/03 10:06:30  friedel
 ;;; Changed history behaviour to push the most recent line always to the
 ;;; front.
