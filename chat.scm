@@ -1,12 +1,13 @@
 #!/usr/local/bin/guile \
 --debug -e main -s
 !#
-;;; $Id: chat.scm,v 1.4 2003/04/09 15:46:16 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.5 2003/04/11 00:53:22 friedel Exp friedel $
 
+;;; A little configuration:
 (define default-nick "Friedel")
 (define DEBUGGING #t)
 
-;;; Configuration (global constants... sort of :)
+;;; Global constants (should not be modified)
 (define admin-nick "Administrator")
 
 (define default-from-arg "")
@@ -33,14 +34,29 @@
 
 (define message-re "^&message=")
 
+(define command-c #\/) ;; Use / as start of commands
+;;; End of constants
+
 (use-modules (srfi srfi-1)
              (ice-9 regex)
              (ice-9 threads))
+
+;; GLOBAL VARIABLES! EVIL! :)
+(define sync-mutex (make-mutex)) ;; Global mutex, 2 threads. Should be
+                                 ;; enough
+(define FINISHED #f)
+;;; End of variables
 
 (dynamic-link "libncurses.so")
 (load-extension "./guile-ncurses.so" "init_curses")
 
 ;;; Functions for building strings
+
+(define (make-command-string text)
+  "Prepends command-character to the string"
+  (string-append (make-string 1 command-c)
+                 text))
+
 (define (url-encode text)
   "Very cheap url-encoding :)"
   ;;; Speculation for fun: The reason why the roskilde chat eats "+"
@@ -283,6 +299,7 @@
                        (+ strpos (cdr startpos))
                      (- strpos (* liney width))))
                 (len (string-length line)))
+           (lock-mutex sync-mutex)
            (wmove window y (-1>0 x))
            (waddstr window
                     (substring line
@@ -291,10 +308,12 @@
            (wclrtoeol window)
            (wmove window y x)
            (wrefresh window)
+           (unlock-mutex sync-mutex)
            (let ((c (wgetch window)))
 ;             (display (format #f "c: ~s~%" c)
 ;                      (current-error-port))
-             (if (equal? c #\cr)
+             (if (or FINISHED
+                     (equal? c #\cr))
                  line
                (case c
                  ((key-backspace #\del #\bs)
@@ -306,6 +325,8 @@
                              (substring line
                                         (+1< strpos len)
                                         len))))
+                 ((#\etx) (make-command-string "quit"))
+                 ((#\sub) (make-command-string "stop"))
                  (else (if (char? c)
                            (rec-edit (+1< strpos width)
                                      (string-append;; add char
@@ -318,6 +339,51 @@
                                                  len)))
                          (rec-edit strpos
                                    line))))))))))
+
+;;; Parser for entered line, checks for command-character at the start
+;;; of the line
+(define (parse-user-input line sock nick)
+  ;;very basic commands (operating on the whole line)
+  (let ((sendpub (lambda ()
+                   (send-public sock nick line)))
+        (donothing (lambda () #t)))
+    (if (string-null? line)
+        donothing ;; do nothing
+      (if (char=? (string-ref line 0)
+                  command-c)
+          (let* ((command-end (string-index line #\space))
+                 (command-args (string-split line #\space))
+                 (command (substring (car command-args)
+                                     1
+                                     (string-length (car command-args))))
+                 (args (cdr command-args))
+                 (rest-from (lambda (n)
+                              (let ((joined (fold (lambda (x y)
+                                                    (string-append x
+                                                                   " "
+                                                                   y))
+                                                  ""
+                                                  (list-cdr-ref args
+                                                                n))))
+                                (substring joined
+                                           0
+                                           (1- (string-length
+                                                joined))))))
+                 ;; more sophisticated commands:
+                 (sendmsg (lambda ()
+                            (send-msg sock
+                                      nick
+                                      (substring (rest-from 2))))))
+            (cond
+             ((string=? command "") sendpub);; Line started with <command-c>#\space,
+             ((string=? command "quit") (lambda () (set! FINISHED #t)))
+             ((or (string=? command "suspend")
+                  (string=? command "stop")) (lambda () (kill (getpid)
+                                                              SIGSTOP)))
+             ((string=? command "msg") sendmsg)
+             (else donothing)))
+        ;; no command, send the line
+        sendpub))))
 
 ;;; Main
 
@@ -342,101 +408,107 @@
          (send-admin-msg sock
                          (string-append nick
                                         " has just logged in"))))
-    (let* ((stdscr (initscr))
-           (FINISHED #f)
-           (typesize 1)
-           (COLS 80)
-           (LINES 24)
-           (scrollwin #f)
-           (typewin #f)
-           (sync-mutex (make-mutex))
-           (aborthandler (lambda (x)
-                           (set! FINISHED #t)))
-           (winchhandler (lambda (x)
-                           (lock-mutex sync-mutex)
-                           (let ((columns (getenv "COLUMNS"))
-                                 (lines (getenv "LINES")))
-                             (set! COLS
-                                   (if columns
-                                       (string->number columns)
-                                     (getmaxx stdscr)))
-                             (set! LINES (if lines
-                                             (string->number lines)
-                                           (getmaxy stdscr))))
-                           (set! scrollwin (newwin (- LINES typesize)
-                                                   COLS
-                                                   0
-                                                   0))
-                           (set! typewin (newwin typesize
-                                                 COLS
-                                                 (- LINES typesize)
-                                                 0))
-                           (unlock-mutex sync-mutex))))
-      (sigaction SIGINT aborthandler)
-      (sigaction SIGQUIT aborthandler)
+    (let ((stdscr (initscr))
+          (typesize 1)
+          (COLS 80)
+          (LINES 24)
+          (scrollwin #f)
+          (typewin #f))
+      (letrec ((winchhandler (lambda (x)
+                               (lock-mutex sync-mutex)
+                               (let ((columns (getenv "COLUMNS"))
+                                     (lines (getenv "LINES")))
+                                 (set! COLS
+                                       (if columns
+                                           (string->number columns)
+                                         (getmaxx stdscr)))
+                                 (set! LINES (if lines
+                                                 (string->number lines)
+                                               (getmaxy stdscr))))
+                               (set! scrollwin (newwin (- LINES typesize)
+                                                       COLS
+                                                       0
+                                                       0))
+                               (set! typewin (newwin typesize
+                                                     COLS
+                                                     (- LINES typesize)
+                                                     0))
+                               (unlock-mutex sync-mutex)))
+               (ignore-all-signals (lambda ()
+                                     (sigaction SIGCONT SIG_IGN)
+                                     (sigaction SIGINT SIG_IGN)
+                                     (sigaction SIGQUIT SIG_IGN)
+                                     (sigaction SIGWINCH SIG_IGN)))
+               (aborthandler (lambda (x) (set! FINISHED #t)))
+               (conthandler (lambda (x) (set-handlers)))
+               (set-handlers (lambda ()
+                               (sigaction SIGCONT conthandler)
+                               (sigaction SIGINT aborthandler)
+                               (sigaction SIGQUIT aborthandler)
+                               (sigaction SIGWINCH winchhandler))))
+              (ignore-all-signals)
       ;;; some ncurses setup
-      (cbreak)
-      (noecho)
-      (nonl)
-      (winchhandler #f) ;; Call the handler once to get the screen
-      ;; size and setup the windows.
-      (scrollok stdscr #f)
-      (scrollok scrollwin #t)
-      (scrollok typewin #f)
-      (leaveok stdscr #t)
-      (leaveok scrollwin #t)
-      (leaveok typewin #f)
-      (keypad typewin #t)
-      (nodelay typewin #t)
-      (clear)
-      (sigaction SIGWINCH winchhandler)
-      ;; 2 Threads now:
-      (let* ((scroller
-              (begin-thread
-               (let loop ()
-                    (lock-mutex sync-mutex)
-                    (let ((type-yx (getyx typewin)))
-                      (wmove scrollwin 0 0)
-                      (set! lines (get-new-lines sock nick lines))
-                      (for-each (lambda (line)
-                                  (waddstr scrollwin line)
-                                  (waddstr scrollwin
-                                           (make-string 1
-                                                        #\newline)))
-                                lines)
-                      (wrefresh scrollwin)
-                      (wrefresh typewin)
-                      (wmove typewin
-                             (car type-yx)
-                             (cdr type-yx)))
-                    (unlock-mutex sync-mutex)
-                    (sleep 1)
-                    (if (not FINISHED)
-                        (loop))))))
-        (let loop ()
-             (lock-mutex sync-mutex)
-             (wclear typewin)
-             (wmove typewin 0 0)
-             (wstandout typewin)
-             (waddstr typewin nick)
-             (wstandend typewin)
-             (waddstr typewin ">> ")
-             (wrefresh typewin)
-             (unlock-mutex sync-mutex)
-             (set! line (enter-string typewin))
-             (if (not (string-null? line))
-                 (send-public sock nick line))
-             (if FINISHED
-               (begin
-                (join-thread scroller)
-                (restore-signals)
-                (if (not DEBUGGING)
-                    (logoff sock nick))
-                (endwin)
-                (primitive-exit))
-               (loop)))))))
+              ;; (cbreak)
+              (raw);; We parse the control characters!
+              (noecho)
+              (nonl)
+              (winchhandler #f);; Call the handler once to get the screen
+              ;; size and setup the windows.
+              (scrollok stdscr #f)
+              (scrollok scrollwin #t)
+              (scrollok typewin #f)
+              (leaveok stdscr #t)
+              (leaveok scrollwin #t)
+              (leaveok typewin #f)
+              (keypad typewin #t)
+              (nodelay typewin #t)
+              (clear)
+              (set-handlers)
+              ;; 2 Threads now:
+              (let* ((scroller
+                      (begin-thread
+                       (let loop ()
+                            (set! lines (get-new-lines sock nick lines))
+                            (lock-mutex sync-mutex)
+                            (wmove scrollwin 0 0)
+                            (for-each (lambda (line)
+                                        (waddstr scrollwin line)
+                                        (waddstr scrollwin
+                                                 (make-string 1
+                                                              #\newline)))
+                                      lines)
+                            (wrefresh scrollwin)
+                            (unlock-mutex sync-mutex)
+                            (sleep 1)
+                            (if (not FINISHED)
+                                (loop))))))
+                (let loop ()
+                     (lock-mutex sync-mutex)
+                     (wclear typewin)
+                     (wmove typewin 0 0)
+                     (wstandout typewin)
+                     (waddstr typewin nick)
+                     (wstandend typewin)
+                     (waddstr typewin ">> ")
+                     (wrefresh typewin)
+                     (unlock-mutex sync-mutex)
+                     (set! line (enter-string typewin))
+                     ((parse-user-input line sock nick)) ; returns a thunk
+                                        ; that is executed immediately
+                     (if FINISHED
+                         (begin
+                          (join-thread scroller)
+                          (restore-signals)
+                          (if (not DEBUGGING)
+                              (logoff sock nick))
+                          (endwin)
+                          (primitive-exit))
+                       (loop))))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.5  2003/04/11 00:53:22  friedel
+;;; Threaded version with own low-level recursive edit (*Phew!*)
+;;;
 ;;; Revision 1.4  2003/04/09 15:46:16  friedel
 ;;; Forked version (with totally garbled screen output!)
 ;;;
