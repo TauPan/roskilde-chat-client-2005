@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.16 2003/04/15 17:47:36 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.17 2003/04/15 22:22:25 friedel Exp friedel $
 
 ;;; A little configuration:
 
@@ -47,7 +47,10 @@ exec guile --debug -e main -s $0 $@
 
 ;;; Get options, they won't change:
 (define OPTIONS (getopt-long (command-line)
-                             '((nologin (single-char #\n)))))
+                             '((nologin (single-char #\n))
+                               (nologfile (single-char #\L))
+                               (logfile (single-char #\l)
+                                        (value #t)))))
 
 ;;; GLOBAL VARIABLES! EVIL! :)
 (define sync-mutex (make-mutex)) ; Global mutex, 2 threads. Should be
@@ -57,6 +60,8 @@ exec guile --debug -e main -s $0 $@
 (define REDRAWLINES #f); if #t, text area is fully redrawn
 (define PASSWORD "")   ; we have to memorize the password because we
                                         ; need to re-authenticate
+(define LOGFILE (string-append  "." ;(getenv "HOME")
+                                "/roskilde-chat.log"))
 ;;; End of variables
 
 (dynamic-link "libncurses.so")
@@ -64,9 +69,12 @@ exec guile --debug -e main -s $0 $@
 
 ;;; Functions for building strings
 
+(define (char->string c)
+  (make-string 1 c))
+
 (define (make-command-string text)
   "Prepends command-character to the string"
-  (string-append (make-string 1 command-c)
+  (string-append (char->string command-c)
                  text))
 
 (define (url-encode text)
@@ -117,8 +125,8 @@ exec guile --debug -e main -s $0 $@
     (let ((rest (cdr lst)))
       (cons (cons (car lst)
                   (if (null? rest)
-                      (error "List must have even number of
-                      elements!")
+                      (error
+                       "List must have even number of elements!")
                     (car rest)))
             (list->alist (cddr lst))))))
 
@@ -147,7 +155,6 @@ exec guile --debug -e main -s $0 $@
   (string-append "GET "
                  url
                  " HTTP/1.0\r\n"
-                 "\r\n"
                  "Host: " host "\r\n"
                  "\r\n"))
 
@@ -196,6 +203,18 @@ exec guile --debug -e main -s $0 $@
 
 ;;; Network and other IO
 
+;;; format is not thread safe, grmbl!
+;;; got the following from
+;;; http://mail.gnu.org/archive/html/bug-guile/2002-11/msg00001.html
+(define safe-format
+  (let ((m (make-mutex)))
+    (lambda args
+      (with-mutex m
+                  (apply format args)))))
+;;; This definition is not used right now, i decided to use
+;;; simple-format where possible and thereby reduced the use of
+;;; (format) to one thread.
+
 (define (get-connector server-name port)
   "Return a thunk that will return a connected socket to
   <port> on <server-name>"
@@ -212,10 +231,10 @@ exec guile --debug -e main -s $0 $@
                     (error "Could not connect!")))))
              (handler
               (lambda (key . args)
-                (format (current-error-port)
+                (simple-format (current-error-port)
                         "Warning: ~s failed.~%"
                         (car args))
-                (format (current-error-port)
+                (simple-format (current-error-port)
                         (cadr args)
                         (cddr args))
                 (newline (current-error-port))))
@@ -310,6 +329,15 @@ exec guile --debug -e main -s $0 $@
     (delete1! "-1"
             (delete1! default-to-arg
                     (string-split cutraw #\,)))))
+
+(define (numusers)
+  "Return number of logged in users"
+  (string->number (car (get-from-chatserver (http-get-args server-url
+                                                           base-url
+                                                           online-url
+                                                           rand-arg
+                                                           (chat-random))
+                                            "^&amount="))))
 
 (define (get-first-line sock message-re)
   "Get first line containing text matching <message-re> (with the
@@ -439,13 +467,29 @@ exec guile --debug -e main -s $0 $@
                                            (substring line
                                                       0
                                                       strpos)
-                                           (make-string 1 c)
+                                           (char->string c)
                                            (substring line
                                                       (+1< strpos len)
                                                       len)))
                               (rec-edit strpos
                                         line))))))))))
           (rec-edit 0 "")))
+
+
+(define (append-log-maybe lines)
+  "Append the list of lines to the logfile, if a log should be written"
+  (if LOGFILE
+      (let ((logport (open LOGFILE
+                           (logior O_WRONLY O_APPEND O_CREAT)
+                           #o600)))
+
+        (for-each (lambda (line)
+                    (simple-format logport
+                                   "~a~%"
+                                   line))
+                  lines)
+        (close logport))
+    #t))
 
 ;;; Some list functions
 (define (appendmax max . args)
@@ -542,7 +586,7 @@ exec guile --debug -e main -s $0 $@
            (names
             (lambda ()
               (send-msg nick
-                        (format #f "*** Logged in Users: ~a"
+                        (simple-format #f "*** Logged in Users: ~a"
                                 (users))
                         nick
                         nick))))
@@ -582,6 +626,19 @@ exec guile --debug -e main -s $0 $@
   (if (not (defined? 'call-with-new-thread))
       (error "Please reconfigure guile with --with-threads and
       recompile and install!"))
+  ;;; Parse options (other than nick)
+  (set! LOGFILE (and (not (option-ref OPTIONS 'nologfile #f))
+                     (option-ref OPTIONS
+                                 'logfile
+                                 LOGFILE)))
+  (if (and LOGFILE
+           (not (or (access? LOGFILE
+                             (logior W_OK
+                                     F_OK))
+                    (access? (dirname LOGFILE)
+                             W_OK))))
+      (error (format #f "No write permission on logfile ~a.~% Bailing out!~%"
+                     LOGFILE)))
   (letrec ((sock '())
            (nick (get-nick))
            (line "")
@@ -659,9 +716,10 @@ exec guile --debug -e main -s $0 $@
                              nick
                              (begin
                               (set! PASSWORD
-                                    (getpass (format #f
-                                                     "Password for ~a: "
-                                                     nick)))
+                                    (getpass
+                                     (simple-format #f
+                                                    "Password for ~a: "
+                                                    nick)))
                               PASSWORD)))
                      (display "Sorry, Try again!")
                      (newline))
@@ -675,6 +733,7 @@ exec guile --debug -e main -s $0 $@
                           (newlines (get-new-lines sock
                                                    nick
                                                    '())))
+                    (append-log-maybe (reverse newlines))
                     (let ((drawlines (if REDRAWLINES
                                          (begin
                                           (werase scrollwin)
@@ -687,8 +746,7 @@ exec guile --debug -e main -s $0 $@
                       (lock-mutex sync-mutex)
                       (for-each (lambda (line)
                                   (waddstr scrollwin
-                                           (make-string 1
-                                                        #\newline))
+                                           (char->string #\newline))
                                   (waddstr scrollwin line))
                                 (reverse drawlines))
                       (wrefresh scrollwin)
@@ -701,8 +759,21 @@ exec guile --debug -e main -s $0 $@
                             (loop oldlines
                               (get-new-lines sock
                                              nick
-                                             oldlines))))))))))
+                                             oldlines)))
+                        (begin
+                         (lock-mutex sync-mutex)
+                         (waddstr scrollwin
+                                  (char->string #\newline))
+                         (waddstr scrollwin
+                                  "Exiting chat. Please wait a moment...")
+                         (wrefresh scrollwin)
+                         (unlock-mutex sync-mutex)))))))))
+          (simple-format #t "Currently logged in: ~a users." (numusers))
           (trylogin)
+          (append-log-maybe (list
+                             (simple-format #f
+                                            "Log started at ~a~%"
+                                            (current-date-and-time))))
           (setup)
           (let ((scroller (makescroller)))
             ;; Screen update as a new thread:
@@ -721,6 +792,12 @@ exec guile --debug -e main -s $0 $@
                                         ; that is executed immediately
                  (if FINISHED
                      (begin
+                      (lock-mutex sync-mutex)
+                      (wclear typewin)
+                      (waddstr typewin
+                               "Exiting chat. Please wait a moment...")
+                      (wrefresh typewin)
+                      (unlock-mutex sync-mutex)
                       (join-thread scroller)
                       (restore-signals)
                       (if (not (option-ref OPTIONS
@@ -728,10 +805,18 @@ exec guile --debug -e main -s $0 $@
                                            #f))
                           (logoff nick))
                       (endwin)
+                      (append-log-maybe
+                       (list
+                        (simple-format #f
+                                       "Log ended at ~a~%"
+                                       (current-date-and-time))))
                       (primitive-exit))
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.17  2003/04/15 22:22:25  friedel
+;;; command-line switch --nologin (or -n) instead of DEBUGGING Parameter
+;;;
 ;;; Revision 1.16  2003/04/15 17:47:36  friedel
 ;;; Make get-connector be a little less smart and just give out new
 ;;; sockets every time (which will be garbage-collected eventually). This
