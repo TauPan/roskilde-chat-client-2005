@@ -1,11 +1,11 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.9 2003/04/11 22:25:51 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.10 2003/04/12 01:12:26 friedel Exp friedel $
 
 ;;; A little configuration:
 (define default-nick "Friedel")
-(define DEBUGGING #t)
+(define DEBUGGING #f)
 
 ;;; Global constants (should not be modified)
 (define admin-nick "Administrator")
@@ -154,52 +154,60 @@ exec guile --debug -e main -s $0 $@
   "drop all lines in <lines> before the first one matching <regexp>.
   Remove the matched substring from the first matching line if
   <remove> is #t"
-  ;; FIXME: A (do) loop would be cleaner here
-  (let* ((matcher #f) ;; matcher is set in drop-while predicate
-         (filtered (drop-while (lambda (line)
-                                 (set! matcher
-                                       (string-match regexp
-                                                     line))
-                                 (not matcher))
-                               lines)))
-    (if (not (null? filtered))
-        (let ((firstmatch (car filtered))
-              (m-start (match:start matcher))
-              (m-end (match:end matcher)))
-          (if remove
-              (cons (string-append (substring firstmatch
-                                              0
-                                              m-start)
-                                   (substring firstmatch
-                                              m-end
-                                              (string-length firstmatch)))
-                    (cdr filtered))
-            filtered))
-      '())))
+  (let remover ((filtered lines)
+                (matcher (string-match regexp (car lines))))
+       (if (null? filtered)
+           '()
+         (if matcher
+             (if remove
+                 (let ((firstmatch (car filtered))
+                       (m-start (match:start matcher))
+                       (m-end (match:end matcher)))
+                   (cons (string-append (substring firstmatch
+                                                   0
+                                                   m-start)
+                                        (substring firstmatch
+                                                   m-end
+                                                   (string-length
+                                                    firstmatch)))
+                         (cdr filtered)))
+               filtered)
+           (remover (cdr filtered)
+                    (string-match regexp (cadr filtered)))))))
+
 
 (define (current-date-and-time)
   (strftime "%T, %Y-%m-%d" (gmtime (current-time))))
 
 ;;; Network and other IO
 
-(define (connect-chat server-url port)
-  "Return a port for talking with the server"
+(define (get-connector server-name port)
   (let* ((entry (gethostbyname server-url))
          (addrs (array-ref entry 4))
          (addr (car addrs))
          (sock (socket AF_INET SOCK_STREAM 0)))
-    (if (connect sock AF_INET addr port)
-        (begin
-         (setvbuf sock _IOLBF)
-         sock)
-      (error "Could not connect!"))))
+    (letrec ((connectme (lambda ()
+                          (if (port-closed? sock)
+                              (set! sock (socket AF_INET SOCK_STREAM 0)))
+                          (if (connect sock AF_INET addr port)
+                              (setvbuf sock _IOLBF)
+                            (error "Could not connect!"))))
+             (handler (lambda (key . args)
+                        (format #t "Warning: ~s failed.~%" (car args))
+                        (format #t (cadr args) (cddr args))
+                        (newline)))
+             (connector (lambda () (catch 'system-error
+                                     connectme
+                                     handler)
+                          sock)))
+            connector)))
 
+(define connect-chat (get-connector server-url server-port))
 
 (define (send-to-server request sock)
-  (let ((sock (connect-chat server-url server-port)))
+  (let ((sock (connect-chat)))
     (display request sock)
     (flush-response sock)))
-
 
 (define (send-msg sock nick msgstring from to)
   (let ((get-url (make-msg-url nick msgstring from to)))
@@ -239,7 +247,7 @@ exec guile --debug -e main -s $0 $@
 
 (define (login sock nick pw)
   "Send login message to server, return #t if 'ok', #f otherwise"
-  (let ((sock (connect-chat server-url server-port)))
+  (let ((sock (connect-chat)))
     (display (http-get-args server-url
                             base-url login-url
                             rand-arg (chat-random)
@@ -284,7 +292,7 @@ exec guile --debug -e main -s $0 $@
 
 (define (get-new-lines sock nick lines)
   (let ((get-url (make-retrieve-url nick))
-        (sock (connect-chat server-url server-port)))
+        (sock (connect-chat)))
     (display (http-get-request server-url get-url)
              sock)
     (if (null? lines)
@@ -583,6 +591,9 @@ exec guile --debug -e main -s $0 $@
                        (loop))))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.10  2003/04/12 01:12:26  friedel
+;;; Edit area is refreshed, too. Small cleanups.
+;;;
 ;;; Revision 1.9  2003/04/11 22:25:51  friedel
 ;;; Make resize do something useful: redraw the text area
 ;;;
