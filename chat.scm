@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.12 2003/04/14 22:36:08 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.13 2003/04/14 22:38:00 friedel Exp friedel $
 
 ;;; A little configuration:
 (define default-nick "Friedel")
@@ -455,52 +455,52 @@ exec guile --debug -e main -s $0 $@
 (define (parse-user-input line sock nick)
   "Return a thunk, based on the users command"
   ;;very basic commands (operating on the whole line or no args):
-  (cond ((string-null? line)
-         true);; do nothing
-        ((char=? (string-ref line 0)
-                 command-c)
-         (let* ((command-end (string-index line #\space))
-                (command-args (string-split line #\space))
-                (command (substring (car command-args)
-                                    1
-                                    (string-length (car command-args))))
-                (args (cdr command-args))
-                (rest-from
-                 (lambda (n)
-                   (let ((joined (fold-right (lambda (x y)
-                                               (string-append x
-                                                              " "
-                                                              y))
-                                             ""
-                                             (list-cdr-ref args
-                                                           n))))
-                     (substring joined
-                                0
-                                (1- (string-length joined))))))
+  (if (string-null? line)
+      true;; do nothing
+    (let* ((command-end (string-index line #\space))
+           (command-args (string-split line #\space))
+           (command (substring (car command-args)
+                               1
+                               (string-length (car command-args))))
+           (args (cdr command-args))
+           (rest-from
+            (lambda (n)
+              (let ((joined (fold-right (lambda (x y)
+                                          (string-append x
+                                                         " "
+                                                         y))
+                                        ""
+                                        (list-cdr-ref args
+                                                      n))))
+                (substring joined
+                           0
+                           (1- (string-length joined))))))
                   ;;; COMMANDS:
-                (sendpub
-                 (lambda ()
-                   (send-public sock nick line)))
-                (sendmsg
-                 (lambda ()
-                   (send-msg sock
-                             nick
-                             (rest-from 1)
-                             nick
-                             (car args)))))
-           (cond
-            ((string=? command "")
-             sendpub)                   ; Line started with <command-c>#\space
-            ((string=? command "quit")
-             (lambda () (set! FINISHED #t)))
-            ((or (string=? command "suspend")
-                 (string=? command "stop"))
-             (lambda () (kill (getpid) SIGSTOP)))
-            ((string=? command "msg")
-             sendmsg)
-            (else false))))
-        ;; no command, send the line
-        (else sendpub)))
+           (sendpub
+            (lambda ()
+              (send-public sock nick line)))
+           (sendmsg
+            (lambda ()
+              (send-msg sock
+                        nick
+                        (rest-from 1)
+                        nick
+                        (car args)))))
+      (if (char=? (string-ref line 0)
+                  command-c)
+          (cond
+           ((string=? command "")
+            sendpub)                    ; Line started with <command-c>#\space
+           ((string=? command "quit")
+            (lambda () (set! FINISHED #t)))
+           ((or (string=? command "suspend")
+                (string=? command "stop"))
+            (lambda () (kill (getpid) SIGSTOP)))
+           ((string=? command "msg")
+            sendmsg)
+           (else false)))
+      ;; no command, send the line
+      sendpub)))
 
 ;;; Main
 
@@ -660,6 +660,10 @@ exec guile --debug -e main -s $0 $@
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.13  2003/04/14 22:38:00  friedel
+;;; Uhm, a bug in parse-user-input ((letrec) instead of (let*)) sneaked in
+;;; during "cleanups" :-}
+;;;
 ;;; Revision 1.12  2003/04/14 22:36:08  friedel
 ;;; Cleaned up, added docstrings to most functions
 ;;;
