@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.20 2003/04/21 13:04:19 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.21 2003/04/21 18:39:10 friedel Exp friedel $
 
 ;;; A little configuration:
 
@@ -623,9 +623,13 @@ exec guile --debug -e main -s $0 $@
                         (car args))))
            (logmein
             (lambda ()
-              (login nick PASSWORD)))
+              (set! SHOULD-LOGIN #t)
+              (login nick (if (not (null? args))
+                              (rest-from 0)
+                            PASSWORD))))
            (logmeoff
             (lambda ()
+              (set! SHOULD-LOGIN #f)
               (logoff nick)))
            (fakemsg
             (lambda ()
@@ -872,6 +876,9 @@ exec guile --debug -e main -s $0 $@
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.21  2003/04/21 18:39:10  friedel
+;;; Improved line Editor (more function keys work)
+;;;
 ;;; Revision 1.20  2003/04/21 13:04:19  friedel
 ;;; Make editor scroll on one line
 ;;;
