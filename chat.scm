@@ -1,7 +1,7 @@
 #!/usr/local/bin/guile \
 --debug -e main -s
 !#
-;;; $Id: $
+;;; $Id: chat.scm,v 1.2 2003/04/09 13:35:10 friedel Exp friedel $
 
 (define default-nick "Friedel")
 
@@ -186,13 +186,15 @@
     (reverse response)))
 
 
+(define (get-response sock regex)
+  (reverse (drop-before-match (get-response-lines sock)
+                              regex
+                              #t)))
 
 (define (get-answer sock regex)
   "get the response from the server, filter the lines with
   (drop-before-match) and print the result"
-  (let ((response (reverse (drop-before-match (get-response-lines sock)
-                                              regex
-                                              #t))))
+  (let ((response (get-response sock regex)))
     (if (not (null? response))
         (for-each (lambda (line)
                     (display line)
@@ -215,20 +217,16 @@
               admin-nick
               default-to-arg))
 
-(define (login sock)
-  (let ((nick (begin
-               (display "Nick: ")
-               (read-line)))
-        (pw (begin
-             (display "Password: ")
-             (read-line))))
-    (send-to-server (http-get-args server-url
-                                   base-url login-url
-                                   rand-arg (chat-random)
-                                   login-arg nick
-                                   password-arg pw)
-                    sock)
-    (cons nick pw)))
+(define (login sock nick pw)
+  "Send login message to server, return #t if 'ok', #f otherwise"
+  (let ((sock (connect-chat server-url server-port)))
+    (display (http-get-args server-url
+                            base-url login-url
+                            rand-arg (chat-random)
+                            login-arg nick
+                            password-arg pw)
+             sock)
+    (string=? "ok&" (car (get-response sock "^&entry=")))))
 
 (define (logoff sock nick)
   (send-to-server (http-get-args server-url
@@ -237,36 +235,45 @@
                                  login-arg nick)
                   sock))
 
+
+;;; Main
+
 (define (main argl)
-  (activate-readline)
+  (let ((in (current-input-port))
+        (out (current-output-port)))
+    (activate-readline)
   ;;; FIXME: Parse command line arguments
-  ;;; FIXME: Proper Login!
-  (let* ((sock '())
-         (nick (car (login sock)))
-         (line "")
-         (sighandler (lambda (x)
-                       (restore-signals)
-                       (send-admin-msg sock (string-append "User "
-                                                           nick
-                                                           " logged off at "
-                                                           (current-date-and-time)))
-                       (logoff sock nick)
-                       (call-with-dynamic-root primitive-exit
-                                               (lambda (return-code) return-code)))))
-    (send-admin-msg sock
-                    (string-append nick
-                                   " has just logged in"))
-    (sigaction SIGINT sighandler)
-    (sigaction SIGQUIT sighandler)
-    (let loop ()
+    (let* ((sock '())
+           (nick default-nick)
+           (line "")
+           (sighandler (lambda (x)
+                         (restore-signals)
+                         (logoff sock nick)
+                         (primitive-exit))))
+      (while (not (login sock
+                         nick
+                         (getpass (format #f
+                                          "Password for ~a: "
+                                          nick))))
+        (display "Sorry, Try again!")
+        (newline))
+      (send-admin-msg sock
+                      (string-append nick
+                                     " has just logged in"))
+      (sigaction SIGINT sighandler)
+      (sigaction SIGQUIT sighandler)
+      (let loop ()
          ;;; FIXME: This needs to use select for the local input, and
          ;;; we should poll regularly if there's new input available
-         (get-text sock nick)
-         (set! line (read-line))
-         (if (not (string-null? line))
-              (send-public sock nick line))
-         (loop))))
+           (get-text sock nick)
+           (set! line (read-line))
+           (if (not (string-null? line))
+               (send-public sock nick line))
+           (loop)))))
 
-;;; $Log: $
+;;; $Log: chat.scm,v $
+;;; Revision 1.2  2003/04/09 13:35:10  friedel
+;;; Refactoring
+;;;
 
 ;;; EOF
