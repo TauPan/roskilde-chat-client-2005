@@ -1,7 +1,7 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.26 2003/04/24 20:13:01 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.27 2003/04/25 23:20:30 friedel Exp friedel $
 ;;; There's no documentation. But the changelog at the bottom of the
 ;;; file should give useful hints.
 
@@ -40,6 +40,10 @@ exec guile --debug -e main -s $0 $@
 (define command-c #\/) ;; Use / as start of commands
 
 (define BUFSIZE 1024)
+
+(define REFRESH-LINES-TIMEOUT 3) ;; Lines will be refreshed every n
+                                        ; seconds
+
 
 ;;; End of constants
 
@@ -931,7 +935,10 @@ exec guile --debug -e main -s $0 $@
                                 (reverse drawlines))
                       (wrefresh scrollwin)
                       (unlock-mutex sync-mutex)
-                      (sleep 2)
+                      (if (and SHOULD-LOGIN
+                               (not (logged-in? nick)))
+                          (login nick PASSWORD))
+                      (sleep REFRESH-LINES-TIMEOUT)
                       (if (not FINISHED)
                           (let ((oldlines (appendmax (* 2 LINES)
                                                      newlines
@@ -970,9 +977,6 @@ exec guile --debug -e main -s $0 $@
                  (set! line (enter-string typewin))
                  ((parse-user-input line sock nick)) ; returns a thunk
                                         ; that is executed immediately
-                 (if (and SHOULD-LOGIN
-                          (not (logged-in? nick)))
-                     (login nick PASSWORD))
                  (if FINISHED
                      (begin
                       (lock-mutex sync-mutex)
@@ -995,6 +999,9 @@ exec guile --debug -e main -s $0 $@
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.27  2003/04/25 23:20:30  friedel
+;;; beautified info display
+;;;
 ;;; Revision 1.26  2003/04/24 20:13:01  friedel
 ;;; A few more editor commands (with esc-prefix or meta)
 ;;;
