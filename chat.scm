@@ -1,7 +1,7 @@
-#!/usr/local/bin/guile \
---debug -e main -s
+#!/bin/sh
+exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.8 2003/04/11 19:43:57 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.9 2003/04/11 22:25:51 friedel Exp friedel $
 
 ;;; A little configuration:
 (define default-nick "Friedel")
@@ -42,12 +42,14 @@
 
 (use-modules (srfi srfi-1)
              (ice-9 regex)
-             (ice-9 threads))
+             (ice-9 threads)
+             (ice-9 format))
 
 ;; GLOBAL VARIABLES! EVIL! :)
 (define sync-mutex (make-mutex)) ;; Global mutex, 2 threads. Should be
                                  ;; enough
-(define FINISHED #f)
+(define FINISHED #f)   ;; it #t, client will terminate
+(define REDRAWEDIT #f) ;; if #t, editing area is redrawn fully
 ;;; End of variables
 
 (dynamic-link "libncurses.so")
@@ -61,6 +63,13 @@
                  text))
 
 (define (url-encode text)
+  "Cheap url encoding (makes hex out of everything :)"
+  (let ((hexlist (map (lambda (c)
+                        (format #f "%~x" (char->integer c)))
+                      (string->list text))))
+    (apply string-append hexlist)))
+
+(define (url-encode-old text)
   "Very cheap url-encoding :)"
   ;;; Speculation for fun: The reason why the roskilde chat eats "+"
   ;;; signs is probably that *their* url-encoding function is probably
@@ -146,10 +155,11 @@
   Remove the matched substring from the first matching line if
   <remove> is #t"
   ;; FIXME: A (do) loop would be cleaner here
-  (let* ((matcher #f) ;; matcher is modified in drop-while predicate
+  (let* ((matcher #f) ;; matcher is set in drop-while predicate
          (filtered (drop-while (lambda (line)
-                                 (set! matcher (string-match regexp
-                                                             line))
+                                 (set! matcher
+                                       (string-match regexp
+                                                     line))
                                  (not matcher))
                                lines)))
     (if (not (null? filtered))
@@ -313,7 +323,7 @@
                    x)))))
     (let rec-edit ((strpos 0)
                    (line ""))
-         (usleep 10000) ; 1/100 s
+         (usleep 10000)                 ; 1/100 s
 ;         (display (format #f "l: ~s~%" line)
 ;                  (current-error-port))
          (let* ((liney (quotient strpos width))
@@ -324,11 +334,17 @@
                      (- strpos (* liney width))))
                 (len (string-length line)))
            (lock-mutex sync-mutex)
-           (wmove window y (-1>0 x))
-           (waddstr window
-                    (substring line
-                               (-1>0 strpos)
-                               len))
+           (if REDRAWEDIT
+               (begin
+                (wmove window (car startpos) (cdr startpos))
+                (waddstr window line)
+                (set! REDRAWEDIT #f))
+             (begin
+              (wmove window y (-1>0 x))
+              (waddstr window
+                       (substring line
+                                  (-1>0 strpos)
+                                  len))))
            (wclrtoeol window)
            (wmove window y x)
            (wrefresh window)
@@ -340,7 +356,7 @@
                      (equal? c #\cr))
                  line
                (case c
-                 ((key-backspace #\del #\bs)
+                 ((key-backspace #\del #\bs) ;; delete backwards
                   (rec-edit (-1>0 strpos)
                             (string-append
                              (substring line
@@ -349,11 +365,11 @@
                              (substring line
                                         (+1< strpos len)
                                         len))))
-                 ((#\etx) (make-command-string "quit"))
-                 ((#\sub) (make-command-string "stop"))
-                 (else (if (char? c)
+                 ((#\etx) (make-command-string "quit")) ;; ctrl-c
+                 ((#\sub) (make-command-string "stop")) ;; ctrl-z
+                 (else (if (char? c) ;; entered char
                            (rec-edit (+1< strpos width)
-                                     (string-append;; add char
+                                     (string-append
                                       (substring line
                                                  0
                                                  strpos)
@@ -410,12 +426,16 @@
                                       nick
                                       (car args)))))
             (cond
-             ((string=? command "") sendpub);; Line started with <command-c>#\space,
-             ((string=? command "quit") (lambda () (set! FINISHED #t)))
+             ((string=? command "")
+              sendpub); Line started with <command-c>#\space
+             ((string=? command "quit")
+              (lambda () (set! FINISHED #t)))
              ((or (string=? command "suspend")
-                  (string=? command "stop")) (lambda () (kill (getpid)
-                                                              SIGSTOP)))
-             ((string=? command "msg") sendmsg)
+                  (string=? command "stop"))
+              (lambda () (kill (getpid)
+                               SIGSTOP)))
+             ((string=? command "msg")
+              sendmsg)
              (else donothing)))
         ;; no command, send the line
         sendpub))))
@@ -448,8 +468,7 @@
           (LINES 24)
           (scrollwin #f)
           (typewin #f)
-          (REDRAWLINES #f)
-          (REDRAWEDIT #f))
+          (REDRAWLINES #f))
       (letrec ((redraw (lambda ()
                          (set! REDRAWLINES #t)
                          (set! REDRAWEDIT #t)))
@@ -504,15 +523,15 @@
               (nodelay typewin #t)
               (clear)
               (set-handlers)
-              ;; 2 Threads now:
+              ;; Screen update as a new thread:
               (let* ((scroller
                       (begin-thread
                        (let loop ((lines '())
                                   (newlines (get-new-lines sock
                                                            nick
                                                            '())))
-                            (display (format #f "New lines: ~s~%~%" newlines)
-                                     (current-error-port))
+;                           (display (format #f "New lines: ~s~%~%" newlines)
+;                                    (current-error-port))
                             (let ((drawlines (if REDRAWLINES
                                                  (begin
                                                   (werase scrollwin)
@@ -531,7 +550,7 @@
                                         (reverse drawlines))
                               (wrefresh scrollwin)
                               (unlock-mutex sync-mutex)
-                              (sleep 4)
+                              (sleep 2)
                               (if (not FINISHED)
                                   (let ((oldlines (appendmax (* 2 LINES)
                                                              newlines
@@ -564,6 +583,9 @@
                        (loop))))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.9  2003/04/11 22:25:51  friedel
+;;; Make resize do something useful: redraw the text area
+;;;
 ;;; Revision 1.8  2003/04/11 19:43:57  friedel
 ;;; Reduced CPU time now... usleep was in the wrong place *Wheee!* :)
 ;;;
