@@ -1,7 +1,9 @@
 #!/bin/sh
 exec guile --debug -e main -s $0 $@
 !#
-;;; $Id: chat.scm,v 1.21 2003/04/21 18:39:10 friedel Exp friedel $
+;;; $Id: chat.scm,v 1.22 2003/04/21 18:47:33 friedel Exp friedel $
+;;; There's no documentation. But the changelog at the bottom of the
+;;; file should give useful hints.
 
 ;;; A little configuration:
 
@@ -83,9 +85,11 @@ exec guile --debug -e main -s $0 $@
 
 (define (url-encode text)
   "Cheap url encoding (makes hex out of everything :)"
+  (lock-mutex sync-mutex) ;; lock, because of format
   (let ((hexlist (map (lambda (c)
                         (format #f "%~x" (char->integer c)))
                       (string->list text))))
+    (unlock-mutex sync-mutex)
     (apply string-append hexlist)))
 
 (define (url-encode-old text)
@@ -876,6 +880,9 @@ exec guile --debug -e main -s $0 $@
                    (loop))))))
 
 ;;; $Log: chat.scm,v $
+;;; Revision 1.22  2003/04/21 18:47:33  friedel
+;;; Make /login take optional password arguments :)
+;;;
 ;;; Revision 1.21  2003/04/21 18:39:10  friedel
 ;;; Improved line Editor (more function keys work)
 ;;;
