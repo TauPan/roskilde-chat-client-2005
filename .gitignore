@@ -35,3 +35,11 @@ _$*
 *.ln
 core
 # CVS default ignores end
+# scheme ignores from github initial commit
+*.ss~
+*.ss#*
+.#*.ss
+
+*.scm~
+*.scm#*
+.#*.scm
